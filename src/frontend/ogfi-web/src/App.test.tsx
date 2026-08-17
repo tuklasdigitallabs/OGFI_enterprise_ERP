@@ -5,6 +5,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { App } from './App'
+import { apiClient } from './api/client'
 
 const kilogramId = '10000000-0000-0000-0000-000000000002'
 
@@ -47,6 +48,10 @@ describe('Batch C application workspace', () => {
   })
 
   it('renders Catalog data through the typed API path and validates create form input', async () => {
+    const direct = await apiClient.GET('/api/catalog/items', { params: { query: { limit: 100 } } })
+    expect(direct.error).toBeUndefined()
+    expect(direct.data?.[0]?.name).toBe('Test Tomato')
+
     window.history.pushState({}, '', '/overview')
     renderApp()
 
