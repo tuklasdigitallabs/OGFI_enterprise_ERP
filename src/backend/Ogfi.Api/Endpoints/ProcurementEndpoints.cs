@@ -13,17 +13,28 @@ public static class ProcurementEndpoints
 {
     public static IEndpointRouteBuilder MapProcurementEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/procurement/suppliers", ListSuppliersAsync).RequireAuthorization();
-        endpoints.MapGet("/api/procurement/suppliers/{supplierId:guid}", GetSupplierAsync).RequireAuthorization();
-        endpoints.MapPost("/api/procurement/suppliers", CreateSupplierAsync).RequireAuthorization();
-        endpoints.MapPut("/api/procurement/suppliers/{supplierId:guid}", UpdateSupplierAsync).RequireAuthorization();
-        endpoints.MapGet("/api/procurement/supplier-offers", ListSupplierOffersAsync).RequireAuthorization();
-        endpoints.MapPost("/api/procurement/supplier-offers", CreateSupplierOfferAsync).RequireAuthorization();
-        endpoints.MapGet("/api/procurement/purchase-orders", ListPurchaseOrdersAsync).RequireAuthorization();
-        endpoints.MapPost("/api/procurement/purchase-orders", CreatePurchaseOrderAsync).RequireAuthorization();
-        endpoints.MapGet("/api/procurement/purchase-orders/{purchaseOrderId:guid}", GetPurchaseOrderAsync).RequireAuthorization();
-        endpoints.MapPut("/api/procurement/purchase-orders/{purchaseOrderId:guid}", UpdatePurchaseOrderAsync).RequireAuthorization();
-        endpoints.MapPost("/api/procurement/purchase-orders/{purchaseOrderId:guid}/submit", SubmitPurchaseOrderAsync).RequireAuthorization();
+        endpoints.MapGet("/api/procurement/suppliers", ListSuppliersAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<SupplierResponse>>();
+        endpoints.MapGet("/api/procurement/suppliers/{supplierId:guid}", GetSupplierAsync)
+            .RequireAuthorization().Produces<SupplierResponse>().Produces(StatusCodes.Status404NotFound);
+        endpoints.MapPost("/api/procurement/suppliers", CreateSupplierAsync)
+            .RequireAuthorization().Produces<SupplierResponse>(StatusCodes.Status201Created);
+        endpoints.MapPut("/api/procurement/suppliers/{supplierId:guid}", UpdateSupplierAsync)
+            .RequireAuthorization().Produces<SupplierResponse>();
+        endpoints.MapGet("/api/procurement/supplier-offers", ListSupplierOffersAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<SupplierOfferResponse>>();
+        endpoints.MapPost("/api/procurement/supplier-offers", CreateSupplierOfferAsync)
+            .RequireAuthorization().Produces<SupplierOfferResponse>(StatusCodes.Status201Created);
+        endpoints.MapGet("/api/procurement/purchase-orders", ListPurchaseOrdersAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<PurchaseOrderSummaryResponse>>();
+        endpoints.MapPost("/api/procurement/purchase-orders", CreatePurchaseOrderAsync)
+            .RequireAuthorization().Produces<PurchaseOrderResponse>(StatusCodes.Status201Created);
+        endpoints.MapGet("/api/procurement/purchase-orders/{purchaseOrderId:guid}", GetPurchaseOrderAsync)
+            .RequireAuthorization().Produces<PurchaseOrderResponse>().Produces(StatusCodes.Status404NotFound);
+        endpoints.MapPut("/api/procurement/purchase-orders/{purchaseOrderId:guid}", UpdatePurchaseOrderAsync)
+            .RequireAuthorization().Produces<PurchaseOrderResponse>();
+        endpoints.MapPost("/api/procurement/purchase-orders/{purchaseOrderId:guid}/submit", SubmitPurchaseOrderAsync)
+            .RequireAuthorization().Produces<PurchaseOrderResponse>();
         return endpoints;
     }
 
@@ -47,9 +58,10 @@ public static class ProcurementEndpoints
             var term = q.Trim().ToUpperInvariant();
             query = query.Where(x => x.Code.Contains(term) || x.Name.ToUpper().Contains(term));
         }
+
         var rows = await query.OrderBy(x => x.Code)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new { x.Id, x.Code, x.Name, x.Status })
+            .Select(x => new SupplierResponse(x.Id, x.Code, x.Name, x.Status))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -66,7 +78,9 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.SupplierRead, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Supplier read permission is required.");
-        var supplier = await db.Suppliers.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tenantId && x.Id == supplierId, cancellationToken);
+
+        var supplier = await db.Suppliers.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.TenantId == tenantId && x.Id == supplierId, cancellationToken);
         if (supplier is null) return Results.NotFound();
         httpContext.Response.Headers.ETag = EndpointSupport.ToEtag(supplier.Version);
         return Results.Ok(MapSupplier(supplier));
@@ -84,6 +98,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.SupplierWrite, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Supplier write permission is required.");
+
         try
         {
             var supplier = await service.CreateSupplierAsync(tenantId, request.Code, request.Name, cancellationToken);
@@ -108,6 +123,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Supplier write permission is required.");
         if (!EndpointSupport.TryReadIfMatch(httpContext, out var expectedVersion))
             return EndpointSupport.Problem(httpContext, 428, "CONCURRENCY.IF_MATCH_REQUIRED", "A valid If-Match ETag is required.");
+
         try
         {
             var supplier = await service.UpdateSupplierAsync(tenantId, supplierId, expectedVersion, request.Name, cancellationToken);
@@ -134,15 +150,14 @@ public static class ProcurementEndpoints
         var query = db.SupplierOffers.AsNoTracking().Where(x => x.TenantId == tenantId);
         if (supplierId is Guid supplier) query = query.Where(x => x.SupplierId == supplier);
         if (catalogItemId is Guid item) query = query.Where(x => x.CatalogItemId == item);
+
         var rows = await query.OrderBy(x => x.SupplierId).ThenBy(x => x.CatalogItemCodeSnapshot)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new
-            {
+            .Select(x => new SupplierOfferResponse(
                 x.Id, x.SupplierId, x.CatalogItemId, x.CatalogItemCodeSnapshot, x.CatalogItemNameSnapshot,
                 x.SupplierItemCode, x.PurchaseUomId, x.PurchaseUomCodeSnapshot, x.BaseUomId, x.BaseUomCodeSnapshot,
                 x.ConversionNumerator, x.ConversionDenominator, x.UnitPrice, x.Currency,
-                x.EffectiveFromBusinessDate, x.EffectiveToBusinessDate
-            })
+                x.EffectiveFromBusinessDate, x.EffectiveToBusinessDate))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -160,6 +175,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.SupplierWrite, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Supplier write permission is required.");
+
         var item = await catalog.GetItemAsync(request.CatalogItemId, cancellationToken);
         if (item is null) return Results.NotFound();
         var conversion = await catalog.ResolvePurchaseConversionAsync(
@@ -167,6 +183,7 @@ public static class ProcurementEndpoints
             new BusinessDate(request.EffectiveFromBusinessDate), cancellationToken);
         if (conversion is null)
             return EndpointSupport.Problem(httpContext, 422, "CATALOG.UOM.CONVERSION_MISSING", "No effective item-specific purchase-to-base conversion exists.");
+
         var reference = new SupplierOfferReferenceInput(
             item.CatalogItemId, item.ItemCode, item.ItemName,
             conversion.PurchaseUomId, conversion.PurchaseUomCode,
@@ -210,13 +227,13 @@ public static class ProcurementEndpoints
             var term = q.Trim().ToUpperInvariant();
             query = query.Where(x => x.Number.Contains(term) || x.SupplierCodeSnapshot.Contains(term) || x.SupplierNameSnapshot.ToUpper().Contains(term));
         }
+
         var rows = await query.OrderByDescending(x => x.CreatedAtUtc)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new
-            {
+            .Select(x => new PurchaseOrderSummaryResponse(
                 x.Id, x.Number, x.SupplierId, x.SupplierCodeSnapshot, x.SupplierNameSnapshot,
-                x.LegalEntityId, x.OutletId, x.Currency, x.Status, x.BusinessDate, x.TotalNetAmount, x.CreatedAtUtc
-            })
+                x.LegalEntityId, x.OutletId, x.Currency, x.Status, x.BusinessDate,
+                x.TotalNetAmount, x.CreatedAtUtc))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -238,10 +255,12 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Purchase Order write permission is required.");
         if (!await authorization.HasOutletScopeAsync(request.OutletId, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.SCOPE_DENIED", "Outlet is outside the user's organization scope.");
+
         var org = await organization.GetOutletAsync(request.OutletId, cancellationToken);
         var businessContext = await businessTime.ResolveAsync(request.OutletId, cancellationToken);
         if (org is null || businessContext is null || org.LegalEntityId != request.LegalEntityId)
             return EndpointSupport.Problem(httpContext, 422, "PROCUREMENT.PO.ORG_INVALID", "Legal Entity and Outlet context is invalid.");
+
         try
         {
             var po = await service.CreateDraftAsync(
@@ -267,6 +286,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.PurchaseOrderRead, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Purchase Order read permission is required.");
+
         var po = await db.PurchaseOrders.AsNoTracking().Include(x => x.Lines)
             .SingleOrDefaultAsync(x => x.TenantId == tenantId && x.Id == purchaseOrderId, cancellationToken);
         if (po is null) return Results.NotFound();
@@ -289,6 +309,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.PurchaseOrderWrite, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Purchase Order write permission is required.");
+
         var outletId = await db.PurchaseOrders.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.Id == purchaseOrderId)
             .Select(x => (Guid?)x.OutletId).SingleOrDefaultAsync(cancellationToken);
@@ -296,6 +317,7 @@ public static class ProcurementEndpoints
         if (!await authorization.HasOutletScopeAsync(outletId.Value, cancellationToken)) return Results.NotFound();
         if (!EndpointSupport.TryReadIfMatch(httpContext, out var expectedVersion))
             return EndpointSupport.Problem(httpContext, 428, "CONCURRENCY.IF_MATCH_REQUIRED", "A valid If-Match ETag is required.");
+
         try
         {
             var po = await service.UpdateDraftLinesAsync(
@@ -322,6 +344,7 @@ public static class ProcurementEndpoints
             return EndpointSupport.Problem(httpContext, 401, "AUTH.TENANT_DENIED", "Tenant execution context is not resolved.");
         if (!await authorization.HasPermissionAsync(ProcurementPermissionCodes.PurchaseOrderSubmit, cancellationToken))
             return EndpointSupport.Problem(httpContext, 403, "AUTH.PERMISSION_DENIED", "Purchase Order submit permission is required.");
+
         var outletId = await db.PurchaseOrders.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.Id == purchaseOrderId)
             .Select(x => (Guid?)x.OutletId).SingleOrDefaultAsync(cancellationToken);
@@ -331,6 +354,7 @@ public static class ProcurementEndpoints
         if (businessContext is null) return Results.NotFound();
         if (!EndpointSupport.TryReadIfMatch(httpContext, out var expectedVersion))
             return EndpointSupport.Problem(httpContext, 428, "CONCURRENCY.IF_MATCH_REQUIRED", "A valid If-Match ETag is required.");
+
         try
         {
             var po = await service.SubmitAsync(
@@ -342,32 +366,28 @@ public static class ProcurementEndpoints
         catch (ProcurementRuleException ex) { return ProcurementProblem(httpContext, ex); }
     }
 
-    private static object MapSupplier(Supplier supplier) => new
-    {
-        supplier.Id, supplier.Code, supplier.Name, supplier.Status
-    };
+    private static SupplierResponse MapSupplier(Supplier supplier)
+        => new(supplier.Id, supplier.Code, supplier.Name, supplier.Status);
 
-    private static object MapSupplierOffer(SupplierOffer offer) => new
-    {
-        offer.Id, offer.SupplierId, offer.CatalogItemId, offer.CatalogItemCodeSnapshot, offer.CatalogItemNameSnapshot,
-        offer.SupplierItemCode, offer.PurchaseUomId, offer.PurchaseUomCodeSnapshot,
-        offer.BaseUomId, offer.BaseUomCodeSnapshot, offer.ConversionNumerator, offer.ConversionDenominator,
-        offer.UnitPrice, offer.Currency, offer.EffectiveFromBusinessDate, offer.EffectiveToBusinessDate
-    };
+    private static SupplierOfferResponse MapSupplierOffer(SupplierOffer offer)
+        => new(
+            offer.Id, offer.SupplierId, offer.CatalogItemId, offer.CatalogItemCodeSnapshot, offer.CatalogItemNameSnapshot,
+            offer.SupplierItemCode, offer.PurchaseUomId, offer.PurchaseUomCodeSnapshot,
+            offer.BaseUomId, offer.BaseUomCodeSnapshot, offer.ConversionNumerator, offer.ConversionDenominator,
+            offer.UnitPrice, offer.Currency, offer.EffectiveFromBusinessDate, offer.EffectiveToBusinessDate);
 
-    private static object MapPurchaseOrder(PurchaseOrder po) => new
-    {
-        po.Id, po.Number, po.SupplierId, po.SupplierCodeSnapshot, po.SupplierNameSnapshot,
-        po.LegalEntityId, po.OutletId, po.Currency, po.Status,
-        businessDate = po.BusinessDate.ToString("yyyy-MM-dd"),
-        po.TotalNetAmount, po.CreatedByUserId, po.CreatedAtUtc, po.SubmittedByUserId, po.SubmittedAtUtc,
-        lines = po.Lines.OrderBy(x => x.LineNumber).Select(x => new
-        {
-            x.Id, x.LineNumber, x.SupplierOfferId, x.CatalogItemId, x.CatalogItemCodeSnapshot, x.CatalogItemNameSnapshot,
-            x.OrderQuantity, x.PurchaseUomId, x.PurchaseUomCodeSnapshot, x.BaseUomId, x.BaseUomCodeSnapshot,
-            x.ConversionNumerator, x.ConversionDenominator, x.UnitPrice, x.LineNetAmount
-        })
-    };
+    private static PurchaseOrderResponse MapPurchaseOrder(PurchaseOrder po)
+        => new(
+            po.Id, po.Number, po.SupplierId, po.SupplierCodeSnapshot, po.SupplierNameSnapshot,
+            po.LegalEntityId, po.OutletId, po.Currency, po.Status, po.BusinessDate.ToString("yyyy-MM-dd"),
+            po.TotalNetAmount, po.CreatedByUserId, po.CreatedAtUtc, po.SubmittedByUserId, po.SubmittedAtUtc,
+            po.Lines.OrderBy(x => x.LineNumber)
+                .Select(x => new PurchaseOrderLineResponse(
+                    x.Id, x.LineNumber, x.SupplierOfferId, x.CatalogItemId,
+                    x.CatalogItemCodeSnapshot, x.CatalogItemNameSnapshot, x.OrderQuantity,
+                    x.PurchaseUomId, x.PurchaseUomCodeSnapshot, x.BaseUomId, x.BaseUomCodeSnapshot,
+                    x.ConversionNumerator, x.ConversionDenominator, x.UnitPrice, x.LineNetAmount))
+                .ToArray());
 
     private static IResult ProcurementProblem(HttpContext httpContext, ProcurementRuleException ex)
     {
