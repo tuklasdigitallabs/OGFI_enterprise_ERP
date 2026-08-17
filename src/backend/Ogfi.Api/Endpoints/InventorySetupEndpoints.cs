@@ -12,10 +12,14 @@ public static class InventorySetupEndpoints
 {
     public static IEndpointRouteBuilder MapInventorySetupEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/inventory/profiles", ListProfilesAsync).RequireAuthorization();
-        endpoints.MapPost("/api/inventory/profiles", CreateProfileAsync).RequireAuthorization();
-        endpoints.MapGet("/api/inventory/stock-locations", ListStockLocationsAsync).RequireAuthorization();
-        endpoints.MapPost("/api/inventory/stock-locations", CreateStockLocationAsync).RequireAuthorization();
+        endpoints.MapGet("/api/inventory/profiles", ListProfilesAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<InventoryProfileResponse>>();
+        endpoints.MapPost("/api/inventory/profiles", CreateProfileAsync)
+            .RequireAuthorization().Produces<InventoryProfileResponse>(StatusCodes.Status201Created);
+        endpoints.MapGet("/api/inventory/stock-locations", ListStockLocationsAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<StockLocationResponse>>();
+        endpoints.MapPost("/api/inventory/stock-locations", CreateStockLocationAsync)
+            .RequireAuthorization().Produces<StockLocationResponse>(StatusCodes.Status201Created);
         return endpoints;
     }
 
@@ -37,7 +41,7 @@ public static class InventorySetupEndpoints
         if (catalogItemId is Guid itemId) query = query.Where(x => x.CatalogItemId == itemId);
         var rows = await query.OrderBy(x => x.CatalogItemId)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new { x.Id, x.CatalogItemId, x.BaseUomId, x.IsStocked, x.NegativeStockAllowed })
+            .Select(x => new InventoryProfileResponse(x.Id, x.CatalogItemId, x.BaseUomId, x.IsStocked, x.NegativeStockAllowed))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -67,10 +71,8 @@ public static class InventorySetupEndpoints
         };
         db.InventoryProfiles.Add(profile);
         await db.SaveChangesAsync(cancellationToken);
-        return Results.Created($"/api/inventory/profiles/{profile.Id}", new
-        {
-            profile.Id, profile.CatalogItemId, profile.BaseUomId, profile.IsStocked, profile.NegativeStockAllowed
-        });
+        return Results.Created($"/api/inventory/profiles/{profile.Id}",
+            new InventoryProfileResponse(profile.Id, profile.CatalogItemId, profile.BaseUomId, profile.IsStocked, profile.NegativeStockAllowed));
     }
 
     private static async Task<IResult> ListStockLocationsAsync(
@@ -98,7 +100,7 @@ public static class InventorySetupEndpoints
         }
         var rows = await query.OrderBy(x => x.Code)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new { x.Id, x.OutletId, x.Code, x.Name, x.LocationType, x.IsActive })
+            .Select(x => new StockLocationResponse(x.Id, x.OutletId, x.Code, x.Name, x.LocationType, x.IsActive))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -133,10 +135,8 @@ public static class InventorySetupEndpoints
         };
         db.StockLocations.Add(location);
         await db.SaveChangesAsync(cancellationToken);
-        return Results.Created($"/api/inventory/stock-locations/{location.Id}", new
-        {
-            location.Id, location.OutletId, location.Code, location.Name, location.LocationType, location.IsActive
-        });
+        return Results.Created($"/api/inventory/stock-locations/{location.Id}",
+            new StockLocationResponse(location.Id, location.OutletId, location.Code, location.Name, location.LocationType, location.IsActive));
     }
 }
 
