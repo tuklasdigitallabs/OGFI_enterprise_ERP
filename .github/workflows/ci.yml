@@ -2,7 +2,7 @@ name: RI-01 CI
 
 on:
   push:
-    branches: [main, 'batch-a/**']
+    branches: [main, 'batch-*/**']
   pull_request:
     branches: [main]
 
@@ -110,22 +110,33 @@ jobs:
       - uses: actions/checkout@v4
       - name: Generate controlled Reference Build Manifest
         run: |
-          cat > RI01-BL01-build-manifest.json <<EOF
+          SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
+            BUILD_BASELINE="RI01-BL02-CANDIDATE"
+            ACTIVE_BATCH="B"
+            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+          else
+            BUILD_BASELINE="RI01-BL01"
+            ACTIVE_BATCH="A"
+            SCHEMA_VERSION="202608170001_InitialFoundation"
+          fi
+          cat > RI01-build-manifest.json <<EOF
           {
             "referenceImplementationId": "RI-01",
-            "buildBaselineId": "RI01-BL01",
-            "architectureBaseline": "OGFI Master Approved Baseline v4.0 / G9.1",
+            "buildBaselineId": "${BUILD_BASELINE}",
+            "architectureBaseline": "OGFI Master Approved Baseline v4.1 / G9.2",
             "sourceRevision": "${GITHUB_SHA}",
+            "sourceBranch": "${SOURCE_BRANCH}",
             "githubRunId": "${GITHUB_RUN_ID}",
             "backendSdk": ".NET SDK 10.0.400",
             "backendPackages": "ASP.NET Core/EF Core 10.x; Npgsql EF 10.x",
             "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
             "apiClientGeneration": "ASP.NET OpenAPI -> openapi-typescript 7.13 -> openapi-fetch 0.17",
             "database": "PostgreSQL 18",
-            "schemaVersion": "202608170001_InitialFoundation",
+            "schemaVersion": "${SCHEMA_VERSION}",
             "configurationBaseline": "RI01-CFG-INITIAL",
             "enabledModules": ["Foundation"],
-            "activeBatch": "A",
+            "activeBatch": "${ACTIVE_BATCH}",
             "status": "IN_IMPLEMENTATION",
             "knownExceptions": []
           }
@@ -133,5 +144,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ri01-reference-build-manifest
-          path: RI01-BL01-build-manifest.json
+          path: RI01-build-manifest.json
           if-no-files-found: error

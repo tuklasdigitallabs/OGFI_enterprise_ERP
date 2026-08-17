@@ -3,9 +3,11 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Api/Ogfi.Api.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.BuildingBlocks/Ogfi.BuildingBlocks.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
   </ItemGroup>
