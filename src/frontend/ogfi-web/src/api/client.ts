@@ -6,4 +6,5 @@ const defaultApiBaseUrl = typeof window !== 'undefined' ? window.location.origin
 export const apiClient = createClient<paths>({
   baseUrl: import.meta.env.VITE_API_BASE_URL || defaultApiBaseUrl,
   credentials: 'include',
+  fetch: (...args) => globalThis.fetch(...args),
 })
