@@ -121,8 +121,15 @@ jobs:
         run: pnpm api:generate
       - name: Build
         run: pnpm build
-      - name: Test
-        run: pnpm test
+      - name: Test with JUnit evidence
+        run: pnpm exec vitest run --reporter=junit --outputFile=vitest-junit.xml
+      - name: Upload frontend test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ri01-frontend-test-evidence
+          path: src/frontend/ogfi-web/vitest-junit.xml
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: ri01-frontend
