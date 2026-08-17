@@ -50,7 +50,7 @@ jobs:
         with:
           node-version: '24'
       - run: corepack enable
-      - run: corepack prepare pnpm@11.0.0 --activate
+      - run: corepack prepare pnpm@11.18.0 --activate
       - name: Install scaffold dependencies
         run: pnpm install --no-frozen-lockfile
       - name: Build
