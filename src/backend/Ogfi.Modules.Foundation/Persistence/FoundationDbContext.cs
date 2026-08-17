@@ -62,7 +62,10 @@ public sealed class FoundationDbContext(DbContextOptions<FoundationDbContext> op
 
         modelBuilder.Entity<Outlet>(entity =>
         {
-            entity.ToTable("outlets");
+            entity.ToTable("outlets", table =>
+                table.HasCheckConstraint(
+                    "CK_outlets_business_day_start",
+                    "\"BusinessDayStartMinutes\" >= 0 AND \"BusinessDayStartMinutes\" < 1440"));
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.TenantId, x.Id });
             entity.Property(x => x.Code).HasMaxLength(50);
