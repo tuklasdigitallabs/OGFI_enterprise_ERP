@@ -131,8 +131,8 @@ public sealed class BatchEStockConsequenceTests(BatchEFixture fixture) : IClassF
         var results = await Task.WhenAll(
             PostReceiptAsync(clientA, first.Id, first.ETag, $"concurrent-{first.Id:N}"),
             PostReceiptAsync(clientB, second.Id, second.ETag, $"concurrent-{second.Id:N}"));
-        Assert.Single(results.Where(x => x.StatusCode == HttpStatusCode.OK));
-        Assert.Single(results.Where(x => x.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.UnprocessableEntity));
+        Assert.Single(results, x => x.StatusCode == HttpStatusCode.OK);
+        Assert.Single(results, x => x.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.UnprocessableEntity);
         Assert.Equal(6m, await fixture.GetReceivedQuantityAsync(po.PurchaseOrderLineId));
 
         var successfulReceipt = results[0].StatusCode == HttpStatusCode.OK ? first.Id : second.Id;
