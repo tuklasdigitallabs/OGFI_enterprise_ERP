@@ -95,11 +95,20 @@ jobs:
         working-directory: src/frontend/ogfi-web
     steps:
       - uses: actions/checkout@v4
-      - name: Verify approved Node.js major
+      - name: Install approved Node.js 24.19.0
+        working-directory: .
+        run: |
+          mkdir -p "${RUNNER_TEMP}/node24"
+          curl --fail --location --retry 5 --retry-all-errors \
+            https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz \
+            -o "${RUNNER_TEMP}/node24.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/node24.tar.xz" -C "${RUNNER_TEMP}/node24" --strip-components=1
+          echo "${RUNNER_TEMP}/node24/bin" >> "${GITHUB_PATH}"
+      - name: Verify approved Node.js version
         run: |
           ACTUAL="$(node --version)"
           echo "Using Node ${ACTUAL}"
-          case "${ACTUAL}" in v24.*) ;; *) exit 1 ;; esac
+          test "${ACTUAL}" = "v24.19.0"
       - run: corepack enable
       - run: corepack prepare pnpm@11.18.0 --activate
       - uses: actions/download-artifact@v4
@@ -154,7 +163,7 @@ jobs:
             "githubRunId": "${GITHUB_RUN_ID}",
             "backendSdk": ".NET SDK 10.0.400",
             "backendPackages": "ASP.NET Core/EF Core 10.x; Npgsql EF 10.x",
-            "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
+            "frontendToolchain": "Node 24.19.0 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
             "apiClientGeneration": "ASP.NET OpenAPI -> openapi-typescript 7.13 -> openapi-fetch 0.17",
             "database": "PostgreSQL 18",
             "schemaVersion": "${SCHEMA_VERSION}",
