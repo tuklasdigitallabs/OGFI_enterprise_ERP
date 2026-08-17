@@ -128,6 +128,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             poEtag = RequireEtag(createPo);
             using var json = JsonDocument.Parse(await createPo.Content.ReadAsStringAsync());
             poId = json.RootElement.GetProperty("id").GetGuid();
+            Assert.Equal(1, json.RootElement.GetProperty("version").GetInt64());
             Assert.Equal(3600m, json.RootElement.GetProperty("totalNetAmount").GetDecimal());
             Assert.Equal($"Fresh Supplier {suffix}", json.RootElement.GetProperty("supplierNameSnapshot").GetString());
             var line = json.RootElement.GetProperty("lines")[0];
@@ -153,7 +154,9 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
         using (var historicalPo = await client.GetAsync($"/api/procurement/purchase-orders/{poId}"))
         {
             historicalPo.EnsureSuccessStatusCode();
+            poEtag = RequireEtag(historicalPo);
             using var json = JsonDocument.Parse(await historicalPo.Content.ReadAsStringAsync());
+            Assert.Equal(1, json.RootElement.GetProperty("version").GetInt64());
             Assert.Equal($"Fresh Supplier {suffix}", json.RootElement.GetProperty("supplierNameSnapshot").GetString());
             Assert.Equal($"Tomato {suffix}", json.RootElement.GetProperty("lines")[0].GetProperty("catalogItemNameSnapshot").GetString());
         }
@@ -164,9 +167,10 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             lines = new[] { new { supplierOfferId = offerId, quantity = 3m } }
         }))
         {
-            updatePo.EnsureSuccessStatusCode();
+            var body = await updatePo.Content.ReadAsStringAsync();
+            Assert.True(updatePo.IsSuccessStatusCode, $"PO update failed with {(int)updatePo.StatusCode}: {body}");
             updatedPoEtag = RequireEtag(updatePo);
-            using var json = JsonDocument.Parse(await updatePo.Content.ReadAsStringAsync());
+            using var json = JsonDocument.Parse(body);
             Assert.Equal(5400m, json.RootElement.GetProperty("totalNetAmount").GetDecimal());
         }
 
