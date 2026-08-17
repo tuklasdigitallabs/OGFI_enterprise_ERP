@@ -114,17 +114,17 @@ jobs:
           if [[ "$SOURCE_BRANCH" == batch-c/* ]]; then
             BUILD_BASELINE="RI01-BL03-CANDIDATE"
             ACTIVE_BATCH="C"
-            SCHEMA_VERSION="BATCH_C_MIGRATION_SET_PENDING"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency"
             ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement"]'
           elif [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
             BUILD_BASELINE="RI01-BL02-CANDIDATE"
             ACTIVE_BATCH="B"
-            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
             ENABLED_MODULES='["Foundation"]'
           else
             BUILD_BASELINE="RI01-BL02"
             ACTIVE_BATCH="C"
-            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
             ENABLED_MODULES='["Foundation"]'
           fi
           cat > RI01-build-manifest.json <<EOF
