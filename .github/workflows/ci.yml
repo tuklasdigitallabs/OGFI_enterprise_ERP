@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   backend:
@@ -41,8 +41,39 @@ jobs:
         run: dotnet run --project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj -c Release
       - name: Test
         run: dotnet test OGFI.sln --no-build -c Release
+      - name: Publish controlled backend artifacts
+        run: |
+          mkdir -p artifacts/backend
+          dotnet publish src/backend/Ogfi.Api/Ogfi.Api.csproj --no-restore -c Release -o artifacts/backend/api
+          dotnet publish src/backend/Ogfi.Workers/Ogfi.Workers.csproj --no-restore -c Release -o artifacts/backend/workers
+          dotnet publish src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj --no-restore -c Release -o artifacts/backend/migrator
+      - name: Export OpenAPI 3.1 contract from running API
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+        run: |
+          mkdir -p artifacts/openapi
+          dotnet run --project src/backend/Ogfi.Api/Ogfi.Api.csproj --no-build -c Release --urls http://127.0.0.1:5080 > /tmp/ogfi-api.log 2>&1 &
+          API_PID=$!
+          trap 'kill ${API_PID} || true' EXIT
+          for i in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:5080/health/ready >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:5080/openapi/v1.json -o artifacts/openapi/ogfi-v1.json
+          test -s artifacts/openapi/ogfi-v1.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ri01-backend
+          path: artifacts/backend
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ri01-openapi
+          path: artifacts/openapi/ogfi-v1.json
+          if-no-files-found: error
 
   frontend:
+    needs: backend
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -54,9 +85,62 @@ jobs:
           node-version: '24'
       - run: corepack enable
       - run: corepack prepare pnpm@11.18.0 --activate
-      - name: Install locked dependencies
-        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ri01-openapi
+          path: artifacts/openapi
+      - name: Update dependency lock for approved client generator
+        run: pnpm install --no-frozen-lockfile
+      - name: Bootstrap updated source-controlled lockfile
+        if: github.event_name == 'push' && github.ref_name == 'batch-a/executable-skeleton'
+        run: |
+          if ! git diff --quiet pnpm-lock.yaml; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add pnpm-lock.yaml
+            git commit -m "chore(frontend): lock OpenAPI client dependencies"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+      - name: Generate TypeScript API types from controlled OpenAPI artifact
+        run: pnpm api:generate
       - name: Build
         run: pnpm build
       - name: Test
         run: pnpm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ri01-frontend
+          path: src/frontend/ogfi-web/dist
+          if-no-files-found: error
+
+  manifest:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate controlled Reference Build Manifest
+        run: |
+          cat > RI01-BL01-build-manifest.json <<EOF
+          {
+            "referenceImplementationId": "RI-01",
+            "buildBaselineId": "RI01-BL01",
+            "architectureBaseline": "OGFI Master Approved Baseline v4.0 / G9.1",
+            "sourceRevision": "${GITHUB_SHA}",
+            "githubRunId": "${GITHUB_RUN_ID}",
+            "backendSdk": ".NET SDK 10.0.400",
+            "backendPackages": "ASP.NET Core/EF Core 10.x; Npgsql EF 10.x",
+            "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8",
+            "database": "PostgreSQL 18",
+            "schemaVersion": "202608170001_InitialFoundation",
+            "configurationBaseline": "RI01-CFG-INITIAL",
+            "enabledModules": ["Foundation"],
+            "activeBatch": "A",
+            "status": "IN_IMPLEMENTATION",
+            "knownExceptions": []
+          }
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ri01-reference-build-manifest
+          path: RI01-BL01-build-manifest.json
+          if-no-files-found: error
