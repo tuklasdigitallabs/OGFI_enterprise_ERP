@@ -16,12 +16,12 @@ import { BrowserRouter, NavLink, Navigate, Outlet, Route, Routes } from 'react-r
 import {
   CatalogPage,
   InventorySetupPage,
-  OverviewPage,
   PurchaseOrderDetailPage,
   PurchaseOrdersPage,
   SupplierOffersPage,
   SuppliersPage,
 } from './pages/BatchCPages'
+import { ApprovalInboxPage, ApprovalTaskPage, BatchDOverviewPage } from './pages/BatchDPages'
 
 const navigation = [
   ['Overview', '/overview'],
@@ -29,6 +29,7 @@ const navigation = [
   ['Suppliers', '/suppliers'],
   ['Supplier Offers', '/supplier-offers'],
   ['Purchase Orders', '/purchase-orders'],
+  ['Approval Inbox', '/approvals'],
   ['Inventory Setup', '/inventory-setup'],
 ] as const
 
@@ -43,8 +44,8 @@ function ApplicationShell() {
               RI-01 · Procure-to-Stock-to-Finance reference implementation
             </Typography>
           </Box>
-          <Chip label="RI01-BL03 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
-          <Chip label="Batch C" size="small" color="secondary" />
+          <Chip label="RI01-BL04 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
+          <Chip label="Batch D" size="small" color="secondary" />
         </Toolbar>
       </AppBar>
 
@@ -85,12 +86,14 @@ export function App() {
       <Routes>
         <Route element={<ApplicationShell />}>
           <Route index element={<Navigate to="/overview" replace />} />
-          <Route path="/overview" element={<OverviewPage />} />
+          <Route path="/overview" element={<BatchDOverviewPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/suppliers" element={<SuppliersPage />} />
           <Route path="/supplier-offers" element={<SupplierOffersPage />} />
           <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
           <Route path="/purchase-orders/:purchaseOrderId" element={<PurchaseOrderDetailPage />} />
+          <Route path="/approvals" element={<ApprovalInboxPage />} />
+          <Route path="/approvals/:taskId" element={<ApprovalTaskPage />} />
           <Route path="/inventory-setup" element={<InventorySetupPage />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Route>

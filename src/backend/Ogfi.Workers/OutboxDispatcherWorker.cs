@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Ogfi.BuildingBlocks.Multitenancy;
 using Ogfi.BuildingBlocks.Observability;
 using Ogfi.Modules.Foundation.Persistence;
 
@@ -14,28 +15,33 @@ public sealed class OutboxDispatcherWorker(
         {
             try
             {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                var db = scope.ServiceProvider.GetRequiredService<FoundationDbContext>();
-                var pending = await db.OutboxMessages
-                    .Where(x => x.ProcessedAtUtc == null)
-                    .OrderBy(x => x.OccurredAtUtc)
-                    .Take(50)
-                    .ToListAsync(stoppingToken);
-
-                foreach (var message in pending)
+                foreach (var tenantId in await GetTenantIdsAsync(stoppingToken))
                 {
-                    message.AttemptCount++;
-                    OgfiMetrics.OutboxDispatchAttempts.Add(1,
-                        new KeyValuePair<string, object?>("message.type", message.Type));
-                    logger.LogInformation(
-                        "Dispatching outbox message {MessageId} {Type} correlation={CorrelationId}",
-                        message.Id, message.Type, message.CorrelationId);
-                    message.ProcessedAtUtc = DateTimeOffset.UtcNow;
-                }
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    var executionContext = scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>();
+                    executionContext.SetCandidateTenant(tenantId);
+                    var db = scope.ServiceProvider.GetRequiredService<FoundationDbContext>();
+                    var pending = await db.OutboxMessages
+                        .Where(x => x.TenantId == tenantId && x.ProcessedAtUtc == null)
+                        .OrderBy(x => x.OccurredAtUtc)
+                        .Take(50)
+                        .ToListAsync(stoppingToken);
 
-                if (pending.Count > 0)
-                {
-                    await db.SaveChangesAsync(stoppingToken);
+                    foreach (var message in pending)
+                    {
+                        message.AttemptCount++;
+                        OgfiMetrics.OutboxDispatchAttempts.Add(1,
+                            new KeyValuePair<string, object?>("message.type", message.Type));
+                        logger.LogInformation(
+                            "Dispatching foundation outbox message {MessageId} {Type} correlation={CorrelationId}",
+                            message.Id, message.Type, message.CorrelationId);
+                        message.ProcessedAtUtc = DateTimeOffset.UtcNow;
+                    }
+
+                    if (pending.Count > 0)
+                    {
+                        await db.SaveChangesAsync(stoppingToken);
+                    }
                 }
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
@@ -47,5 +53,12 @@ public sealed class OutboxDispatcherWorker(
 
             await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
         }
+    }
+
+    private async Task<Guid[]> GetTenantIdsAsync(CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<FoundationDbContext>();
+        return await db.Tenants.AsNoTracking().Select(x => x.Id).ToArrayAsync(cancellationToken);
     }
 }
