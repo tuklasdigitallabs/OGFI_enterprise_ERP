@@ -38,7 +38,7 @@ function ApplicationShell() {
       <AppBar position="static" elevation={0}>
         <Toolbar sx={{ gap: 2 }}>
           <Box sx={{ flexGrow: 1 }}>
-            <Typography variant="h6" fontWeight={700}>OGFI Enterprise ERP</Typography>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>OGFI Enterprise ERP</Typography>
             <Typography variant="caption" sx={{ opacity: 0.8 }}>
               RI-01 · Procure-to-Stock-to-Finance reference implementation
             </Typography>
@@ -49,7 +49,7 @@ function ApplicationShell() {
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 3 }}>
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} alignItems="flex-start">
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ alignItems: 'flex-start' }}>
           <Paper component="nav" variant="outlined" sx={{ width: { xs: '100%', md: 230 }, flexShrink: 0, overflow: 'hidden' }}>
             <Box sx={{ p: 2 }}>
               <Typography variant="overline" color="text.secondary">Reference workspace</Typography>
@@ -70,7 +70,7 @@ function ApplicationShell() {
             </List>
           </Paper>
 
-          <Box component="main" sx={{ flex: 1, minWidth: 0 }}>
+          <Box component="main" sx={{ flex: 1, minWidth: 0, width: '100%' }}>
             <Outlet />
           </Box>
         </Stack>
