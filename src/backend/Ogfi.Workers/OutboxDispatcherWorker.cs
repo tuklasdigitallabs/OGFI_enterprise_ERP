@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Ogfi.BuildingBlocks.Observability;
 using Ogfi.Modules.Foundation.Persistence;
 
 namespace Ogfi.Workers;
@@ -24,7 +25,10 @@ public sealed class OutboxDispatcherWorker(
                 foreach (var message in pending)
                 {
                     message.AttemptCount++;
-                    logger.LogInformation("Dispatching outbox message {MessageId} {Type} correlation={CorrelationId}",
+                    OgfiMetrics.OutboxDispatchAttempts.Add(1,
+                        new KeyValuePair<string, object?>("message.type", message.Type));
+                    logger.LogInformation(
+                        "Dispatching outbox message {MessageId} {Type} correlation={CorrelationId}",
                         message.Id, message.Type, message.CorrelationId);
                     message.ProcessedAtUtc = DateTimeOffset.UtcNow;
                 }
@@ -36,6 +40,8 @@ public sealed class OutboxDispatcherWorker(
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
+                OgfiMetrics.WorkerFailures.Add(1,
+                    new KeyValuePair<string, object?>("worker", nameof(OutboxDispatcherWorker)));
                 logger.LogError(ex, "Outbox worker iteration failed; retrying with bounded delay");
             }
 

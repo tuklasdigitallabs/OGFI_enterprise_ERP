@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using Ogfi.BuildingBlocks.Observability;
 using Ogfi.Modules.Foundation.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,9 +27,25 @@ app.Use(async (context, next) =>
         : Guid.NewGuid().ToString("N");
 
     context.Response.Headers[header] = correlationId;
+    var stopwatch = Stopwatch.StartNew();
+
     using (app.Logger.BeginScope(new Dictionary<string, object?> { ["CorrelationId"] = correlationId }))
     {
-        await next();
+        try
+        {
+            await next();
+        }
+        finally
+        {
+            stopwatch.Stop();
+            var tags = new TagList
+            {
+                { "http.method", context.Request.Method },
+                { "http.status_code", context.Response.StatusCode }
+            };
+            OgfiMetrics.ApiRequests.Add(1, tags);
+            OgfiMetrics.ApiDurationMs.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+        }
     }
 });
 
@@ -43,7 +61,8 @@ app.MapGet("/api/system/info", () => Results.Ok(new
     referenceImplementation = "RI-01",
     baseline = "RI01-BL01",
     activeBatch = "A",
-    status = "IN_IMPLEMENTATION"
+    status = "IN_IMPLEMENTATION",
+    metricsMeter = OgfiMetrics.MeterName
 }));
 
 app.Run();
