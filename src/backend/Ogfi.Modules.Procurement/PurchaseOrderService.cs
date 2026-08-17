@@ -198,7 +198,8 @@ public sealed class PurchaseOrderService(ProcurementDbContext dbContext)
             throw new ProcurementRuleException("PROCUREMENT.PO.NOT_APPROVABLE", "Purchase Order must contain at least one line.");
         }
 
-        var po = await dbContext.PurchaseOrders.Include(x => x.Lines)
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var po = await dbContext.PurchaseOrders
             .SingleOrDefaultAsync(x => x.TenantId == tenantId && x.Id == purchaseOrderId, cancellationToken);
         EnsureEditable(po, expectedVersion);
 
@@ -211,18 +212,28 @@ public sealed class PurchaseOrderService(ProcurementDbContext dbContext)
             throw new ProcurementRuleException("PROCUREMENT.PO.NOT_APPROVABLE", "One or more Supplier Offers are missing.");
         }
 
-        dbContext.PurchaseOrderLines.RemoveRange(po!.Lines);
-        po.Lines = BuildLines(po, po.SupplierId, po.Currency, po.BusinessDate, requestedLines, offers);
-        po.TotalNetAmount = po.Lines.Sum(x => x.LineNetAmount);
+        var replacementLines = BuildLines(po!, po!.SupplierId, po.Currency, po.BusinessDate, requestedLines, offers);
+
+        await dbContext.PurchaseOrderLines
+            .Where(x => x.TenantId == tenantId && x.PurchaseOrderId == purchaseOrderId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        dbContext.PurchaseOrderLines.AddRange(replacementLines);
+        po.Lines = replacementLines;
+        po.TotalNetAmount = replacementLines.Sum(x => x.LineNetAmount);
         po.Version++;
+
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
+            await transaction.RollbackAsync(cancellationToken);
             throw new ProcurementRuleException("CONCURRENCY.CONFLICT", "Purchase Order was modified by another request.");
         }
+
         return po;
     }
 
