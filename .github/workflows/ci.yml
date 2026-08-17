@@ -111,20 +111,27 @@ jobs:
       - name: Generate controlled Reference Build Manifest
         run: |
           SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
+          if [[ "$SOURCE_BRANCH" == batch-c/* ]]; then
+            BUILD_BASELINE="RI01-BL03-CANDIDATE"
+            ACTIVE_BATCH="C"
+            SCHEMA_VERSION="BATCH_C_MIGRATION_SET_PENDING"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement"]'
+          elif [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
             BUILD_BASELINE="RI01-BL02-CANDIDATE"
             ACTIVE_BATCH="B"
             SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+            ENABLED_MODULES='["Foundation"]'
           else
-            BUILD_BASELINE="RI01-BL01"
-            ACTIVE_BATCH="A"
-            SCHEMA_VERSION="202608170001_InitialFoundation"
+            BUILD_BASELINE="RI01-BL02"
+            ACTIVE_BATCH="C"
+            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+            ENABLED_MODULES='["Foundation"]'
           fi
           cat > RI01-build-manifest.json <<EOF
           {
             "referenceImplementationId": "RI-01",
             "buildBaselineId": "${BUILD_BASELINE}",
-            "architectureBaseline": "OGFI Master Approved Baseline v4.1 / G9.2",
+            "architectureBaseline": "OGFI Master Approved Baseline v4.2 / G9.3",
             "sourceRevision": "${GITHUB_SHA}",
             "sourceBranch": "${SOURCE_BRANCH}",
             "githubRunId": "${GITHUB_RUN_ID}",
@@ -135,7 +142,7 @@ jobs:
             "database": "PostgreSQL 18",
             "schemaVersion": "${SCHEMA_VERSION}",
             "configurationBaseline": "RI01-CFG-INITIAL",
-            "enabledModules": ["Foundation"],
+            "enabledModules": ${ENABLED_MODULES},
             "activeBatch": "${ACTIVE_BATCH}",
             "status": "IN_IMPLEMENTATION",
             "knownExceptions": []

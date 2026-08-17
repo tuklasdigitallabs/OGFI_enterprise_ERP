@@ -5,17 +5,28 @@ namespace Ogfi.ArchitectureTests;
 public sealed class ModuleBoundaryTests
 {
     [Fact]
-    public void Foundation_module_does_not_reference_future_business_modules()
+    public void Business_modules_do_not_reference_other_business_module_implementations()
     {
-        var references = typeof(Ogfi.Modules.Foundation.Persistence.FoundationDbContext)
-            .Assembly
-            .GetReferencedAssemblies()
-            .Select(x => x.Name)
-            .Where(x => x is not null)
-            .ToArray();
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Foundation.Persistence.FoundationDbContext).Assembly,
+            "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Catalog.Persistence.CatalogDbContext).Assembly,
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Inventory.Persistence.InventoryDbContext).Assembly,
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Procurement.Persistence.ProcurementDbContext).Assembly,
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Finance");
+    }
 
-        Assert.DoesNotContain("Ogfi.Modules.Procurement", references);
-        Assert.DoesNotContain("Ogfi.Modules.Inventory", references);
-        Assert.DoesNotContain("Ogfi.Modules.Finance", references);
+    private static void AssertNoBusinessModuleReferences(System.Reflection.Assembly assembly, params string[] forbidden)
+    {
+        var references = assembly.GetReferencedAssemblies().Select(x => x.Name).Where(x => x is not null).ToArray();
+        foreach (var name in forbidden)
+        {
+            Assert.DoesNotContain(name, references);
+        }
     }
 }

@@ -1,0 +1,35 @@
+name: Batch C EF Migration Bootstrap
+
+on:
+  push:
+    branches: ['batch-c/purchasing-master-data-spine']
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: batch-c/purchasing-master-data-spine
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+      - run: dotnet restore OGFI.sln
+      - name: Install EF tool
+        run: dotnet tool install --global dotnet-ef --version 10.0.10
+      - name: Generate module migrations
+        run: |
+          dotnet ef migrations add InitialCatalog --project src/backend/Ogfi.Modules.Catalog/Ogfi.Modules.Catalog.csproj --startup-project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj --context Ogfi.Modules.Catalog.Persistence.CatalogDbContext --output-dir Persistence/Migrations
+          dotnet ef migrations add InitialInventory --project src/backend/Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj --startup-project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj --context Ogfi.Modules.Inventory.Persistence.InventoryDbContext --output-dir Persistence/Migrations
+          dotnet ef migrations add InitialProcurement --project src/backend/Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj --startup-project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj --context Ogfi.Modules.Procurement.Persistence.ProcurementDbContext --output-dir Persistence/Migrations
+      - name: Commit generated migrations and exact snapshots
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/backend/Ogfi.Modules.Catalog/Persistence/Migrations src/backend/Ogfi.Modules.Inventory/Persistence/Migrations src/backend/Ogfi.Modules.Procurement/Persistence/Migrations
+          git commit -m 'chore(batch-c): generate EF module migrations'
+          git push origin HEAD:batch-c/purchasing-master-data-spine
