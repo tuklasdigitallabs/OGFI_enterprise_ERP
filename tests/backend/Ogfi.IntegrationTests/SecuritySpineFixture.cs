@@ -27,6 +27,7 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
 
     public const string AliceSubject = "cognito|alice";
     public const string BobSubject = "cognito|bob";
+    private const string RlsTestRole = "ogfi_rls_test";
 
     private static readonly DateTimeOffset FixedUtcNow = new(2026, 8, 17, 19, 0, 0, TimeSpan.Zero);
 
@@ -65,6 +66,7 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
             await dbContext.Database.MigrateAsync();
         }
 
+        await EnsureRlsTestRoleAsync();
         await SeedAsync();
     }
 
@@ -82,13 +84,61 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
         return client;
     }
 
-    public async Task<long> CountVisibleOutletsAsync(Guid tenantId)
+    public async Task<long> CountVisibleOutletsAsRuntimeRoleAsync(Guid tenantId)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
-        await SetTenantAsync(connection, tenantId);
+        await SetRuntimeRoleAndTenantAsync(connection, tenantId);
         await using var command = new NpgsqlCommand("select count(*) from foundation.outlets;", connection);
         return (long)(await command.ExecuteScalarAsync() ?? 0L);
+    }
+
+    public async Task AttemptCrossTenantLegalEntityInsertAsRuntimeRoleAsync(Guid activeTenantId, Guid rowTenantId)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await SetRuntimeRoleAndTenantAsync(connection, activeTenantId);
+        await using var command = new NpgsqlCommand("""
+            insert into foundation.legal_entities ("Id", "TenantId", "Code", "Name")
+            values (@id, @tenant, 'RLS-BLOCK', 'Must Be Blocked');
+            """, connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("tenant", rowTenantId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<(bool Enabled, bool Forced, long Policies)> GetOutletRlsStateAsync()
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            select c.relrowsecurity, c.relforcerowsecurity,
+                   (select count(*) from pg_policies p where p.schemaname = 'foundation' and p.tablename = 'outlets')
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'foundation' and c.relname = 'outlets';
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetInt64(2));
+    }
+
+    private async Task EnsureRlsTestRoleAsync()
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await ExecuteAsync(connection, $"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RlsTestRole}') THEN
+                    CREATE ROLE {RlsTestRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+                END IF;
+            END
+            $$;
+            GRANT USAGE ON SCHEMA foundation TO {RlsTestRole};
+            GRANT SELECT ON foundation.outlets TO {RlsTestRole};
+            GRANT INSERT ON foundation.legal_entities TO {RlsTestRole};
+            """);
     }
 
     private async Task SeedAsync()
@@ -148,6 +198,11 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
     private static Task SetTenantAsync(NpgsqlConnection connection, Guid tenantId)
     {
         return ExecuteAsync(connection, $"select set_config('app.tenant_id', '{tenantId}', false);");
+    }
+
+    private static Task SetRuntimeRoleAndTenantAsync(NpgsqlConnection connection, Guid tenantId)
+    {
+        return ExecuteAsync(connection, $"SET ROLE {RlsTestRole}; select set_config('app.tenant_id', '{tenantId}', false);");
     }
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql)

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Npgsql;
 using Xunit;
 
 namespace Ogfi.IntegrationTests;
@@ -60,10 +61,30 @@ public sealed class SecuritySpineTests(SecuritySpineFixture fixture) : IClassFix
     }
 
     [Fact]
-    public async Task PostgreSql_row_level_security_limits_outlets_to_active_tenant_session()
+    public async Task PostgreSql_row_level_security_limits_reads_under_non_bypass_runtime_role()
     {
-        Assert.Equal(2, await fixture.CountVisibleOutletsAsync(SecuritySpineFixture.TenantA));
-        Assert.Equal(1, await fixture.CountVisibleOutletsAsync(SecuritySpineFixture.TenantB));
+        Assert.Equal(2, await fixture.CountVisibleOutletsAsRuntimeRoleAsync(SecuritySpineFixture.TenantA));
+        Assert.Equal(1, await fixture.CountVisibleOutletsAsRuntimeRoleAsync(SecuritySpineFixture.TenantB));
+    }
+
+    [Fact]
+    public async Task PostgreSql_row_level_security_rejects_cross_tenant_writes_under_runtime_role()
+    {
+        var exception = await Assert.ThrowsAsync<PostgresException>(() =>
+            fixture.AttemptCrossTenantLegalEntityInsertAsRuntimeRoleAsync(
+                SecuritySpineFixture.TenantA,
+                SecuritySpineFixture.TenantB));
+
+        Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+    }
+
+    [Fact]
+    public async Task Outlet_row_level_security_is_enabled_forced_and_policy_backed()
+    {
+        var state = await fixture.GetOutletRlsStateAsync();
+        Assert.True(state.Enabled);
+        Assert.True(state.Forced);
+        Assert.Equal(1, state.Policies);
     }
 
     private static async Task<string?> ReadErrorCodeAsync(HttpResponseMessage response)

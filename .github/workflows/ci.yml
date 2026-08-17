@@ -114,7 +114,7 @@ jobs:
           if [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
             BUILD_BASELINE="RI01-BL02-CANDIDATE"
             ACTIVE_BATCH="B"
-            SCHEMA_VERSION="202608170002_SecuritySpine"
+            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
           else
             BUILD_BASELINE="RI01-BL01"
             ACTIVE_BATCH="A"
