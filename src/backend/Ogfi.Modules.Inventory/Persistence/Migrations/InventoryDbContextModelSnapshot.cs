@@ -23,6 +23,95 @@ namespace Ogfi.Modules.Inventory.Persistence.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Ogfi.Modules.Inventory.InventoryMovement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BaseUomCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<Guid>("BaseUomId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("BusinessDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("CatalogItemCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<Guid>("CatalogItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CatalogItemNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("MovementType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OutletId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PurchaseOrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PurchaseOrderLineId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("QuantityBaseUom")
+                        .HasPrecision(19, 6)
+                        .HasColumnType("numeric(19,6)");
+
+                    b.Property<Guid>("SourceDocumentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SourceEventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SourceLineId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("StockLocationCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("StockLocationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "CatalogItemId", "StockLocationId", "OccurredAtUtc");
+
+                    b.HasIndex("TenantId", "SourceEventId", "SourceLineId")
+                        .IsUnique();
+
+                    b.ToTable("inventory_movements", "inventory", t =>
+                        {
+                            t.HasCheckConstraint("CK_inventory_movement_quantity", "\"QuantityBaseUom\" <> 0");
+                        });
+                });
+
             modelBuilder.Entity("Ogfi.Modules.Inventory.InventoryProfile", b =>
                 {
                     b.Property<Guid>("Id")
@@ -52,6 +141,47 @@ namespace Ogfi.Modules.Inventory.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("inventory_profiles", "inventory");
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Inventory.InventorySourceEffect", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("ProcessedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SourceDocumentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SourceEventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SourceType")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "SourceEventId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "SourceType", "SourceDocumentId");
+
+                    b.ToTable("inventory_source_effects", "inventory");
                 });
 
             modelBuilder.Entity("Ogfi.Modules.Inventory.StockLocation", b =>
@@ -92,6 +222,68 @@ namespace Ogfi.Modules.Inventory.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("stock_locations", "inventory");
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Inventory.StockPosition", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BaseUomCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<Guid>("BaseUomId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CatalogItemCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<Guid>("CatalogItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CatalogItemNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset?>("LastMovementOccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OutletId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("QuantityOnHand")
+                        .HasPrecision(19, 6)
+                        .HasColumnType("numeric(19,6)");
+
+                    b.Property<string>("StockLocationCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("StockLocationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "CatalogItemId", "StockLocationId", "BaseUomId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "OutletId", "CatalogItemId");
+
+                    b.ToTable("stock_positions", "inventory");
                 });
 #pragma warning restore 612, 618
         }
