@@ -7,5 +7,8 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Catalog/Ogfi.Modules.Catalog.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
   </ItemGroup>
 </Project>

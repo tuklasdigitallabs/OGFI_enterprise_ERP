@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ri01-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -30,9 +34,20 @@ jobs:
       ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.400'
+      - name: Install approved .NET SDK 10.0.400
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dotnet"
+          curl --fail --location --retry 5 --retry-all-errors \
+            https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-linux-x64.tar.gz \
+            -o "${RUNNER_TEMP}/dotnet-sdk.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/dotnet-sdk.tar.gz" -C "${RUNNER_TEMP}/dotnet"
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
+      - name: Verify approved .NET SDK
+        run: |
+          ACTUAL="$(dotnet --version)"
+          echo "Using .NET SDK ${ACTUAL}"
+          test "${ACTUAL}" = "10.0.400"
       - name: Restore
         run: dotnet restore OGFI.sln
       - name: Build
@@ -80,9 +95,20 @@ jobs:
         working-directory: src/frontend/ogfi-web
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+      - name: Install approved Node.js 24.19.0
+        working-directory: .
+        run: |
+          mkdir -p "${RUNNER_TEMP}/node24"
+          curl --fail --location --retry 5 --retry-all-errors \
+            https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz \
+            -o "${RUNNER_TEMP}/node24.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/node24.tar.xz" -C "${RUNNER_TEMP}/node24" --strip-components=1
+          echo "${RUNNER_TEMP}/node24/bin" >> "${GITHUB_PATH}"
+      - name: Verify approved Node.js version
+        run: |
+          ACTUAL="$(node --version)"
+          echo "Using Node ${ACTUAL}"
+          test "${ACTUAL}" = "v24.19.0"
       - run: corepack enable
       - run: corepack prepare pnpm@11.18.0 --activate
       - uses: actions/download-artifact@v4
@@ -95,8 +121,15 @@ jobs:
         run: pnpm api:generate
       - name: Build
         run: pnpm build
-      - name: Test
-        run: pnpm test
+      - name: Test with JUnit evidence
+        run: pnpm exec vitest run --reporter=junit --outputFile=vitest-junit.xml
+      - name: Upload frontend test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ri01-frontend-test-evidence
+          path: src/frontend/ogfi-web/vitest-junit.xml
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: ri01-frontend
@@ -111,31 +144,38 @@ jobs:
       - name: Generate controlled Reference Build Manifest
         run: |
           SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
+          if [[ "$SOURCE_BRANCH" == batch-c/* ]]; then
+            BUILD_BASELINE="RI01-BL03-CANDIDATE"
+            ACTIVE_BATCH="C"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement"]'
+          elif [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
             BUILD_BASELINE="RI01-BL02-CANDIDATE"
             ACTIVE_BATCH="B"
-            SCHEMA_VERSION="20260817132100_SecuritySpineRls"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
+            ENABLED_MODULES='["Foundation"]'
           else
-            BUILD_BASELINE="RI01-BL01"
-            ACTIVE_BATCH="A"
-            SCHEMA_VERSION="202608170001_InitialFoundation"
+            BUILD_BASELINE="RI01-BL02"
+            ACTIVE_BATCH="C"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
+            ENABLED_MODULES='["Foundation"]'
           fi
           cat > RI01-build-manifest.json <<EOF
           {
             "referenceImplementationId": "RI-01",
             "buildBaselineId": "${BUILD_BASELINE}",
-            "architectureBaseline": "OGFI Master Approved Baseline v4.1 / G9.2",
+            "architectureBaseline": "OGFI Master Approved Baseline v4.2 / G9.3",
             "sourceRevision": "${GITHUB_SHA}",
             "sourceBranch": "${SOURCE_BRANCH}",
             "githubRunId": "${GITHUB_RUN_ID}",
             "backendSdk": ".NET SDK 10.0.400",
             "backendPackages": "ASP.NET Core/EF Core 10.x; Npgsql EF 10.x",
-            "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
+            "frontendToolchain": "Node 24.19.0 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
             "apiClientGeneration": "ASP.NET OpenAPI -> openapi-typescript 7.13 -> openapi-fetch 0.17",
             "database": "PostgreSQL 18",
             "schemaVersion": "${SCHEMA_VERSION}",
             "configurationBaseline": "RI01-CFG-INITIAL",
-            "enabledModules": ["Foundation"],
+            "enabledModules": ${ENABLED_MODULES},
             "activeBatch": "${ACTIVE_BATCH}",
             "status": "IN_IMPLEMENTATION",
             "knownExceptions": []

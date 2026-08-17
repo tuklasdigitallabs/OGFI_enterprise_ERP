@@ -2,6 +2,9 @@
   <ItemGroup>
     <ProjectReference Include="../Ogfi.BuildingBlocks/Ogfi.BuildingBlocks.csproj" />
     <ProjectReference Include="../Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Catalog/Ogfi.Modules.Catalog.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
     <PackageReference Include="Microsoft.OpenApi" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" />

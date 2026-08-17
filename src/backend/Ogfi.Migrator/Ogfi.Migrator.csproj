@@ -4,6 +4,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Catalog/Ogfi.Modules.Catalog.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
   </ItemGroup>
 </Project>

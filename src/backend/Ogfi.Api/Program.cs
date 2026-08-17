@@ -5,15 +5,18 @@ using Ogfi.Api.Endpoints;
 using Ogfi.Api.Security;
 using Ogfi.BuildingBlocks.Multitenancy;
 using Ogfi.BuildingBlocks.Observability;
+using Ogfi.Modules.Catalog;
+using Ogfi.Modules.Catalog.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Foundation.Security;
+using Ogfi.Modules.Inventory.Persistence;
+using Ogfi.Modules.Procurement;
+using Ogfi.Modules.Procurement.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<FoundationDbContext>();
 
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -40,14 +43,29 @@ builder.Services.AddScoped<TenantSessionConnectionInterceptor>();
 builder.Services.AddScoped<MembershipResolver>();
 builder.Services.AddScoped<FoundationAuthorizationEvaluator>();
 builder.Services.AddScoped<BusinessTimeResolver>();
+builder.Services.AddScoped<FoundationOrganizationReferenceService>();
+builder.Services.AddScoped<CatalogReferenceService>();
+builder.Services.AddScoped<StandardUomConversionService>();
+builder.Services.AddScoped<PurchaseOrderService>();
 builder.Services.AddSingleton(TimeProvider.System);
 
 var connectionString = builder.Configuration.GetConnectionString("Postgres")
     ?? "Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev";
 
 builder.Services.AddDbContext<FoundationDbContext>((serviceProvider, options) =>
-    options.UseNpgsql(connectionString)
-        .AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+    options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddDbContext<CatalogDbContext>((serviceProvider, options) =>
+    options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddDbContext<InventoryDbContext>((serviceProvider, options) =>
+    options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddDbContext<ProcurementDbContext>((serviceProvider, options) =>
+    options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<FoundationDbContext>("foundation-db")
+    .AddDbContextCheck<CatalogDbContext>("catalog-db")
+    .AddDbContextCheck<InventoryDbContext>("inventory-db")
+    .AddDbContextCheck<ProcurementDbContext>("procurement-db");
 
 var app = builder.Build();
 
@@ -59,6 +77,7 @@ app.Use(async (context, next) =>
         ? supplied.ToString()
         : Guid.NewGuid().ToString("N");
 
+    context.Items["CorrelationId"] = correlationId;
     context.Response.Headers[header] = correlationId;
     var stopwatch = Stopwatch.StartNew();
 
@@ -96,12 +115,16 @@ app.MapHealthChecks("/health/ready");
 app.MapGet("/api/system/info", () => Results.Ok(new
 {
     referenceImplementation = "RI-01",
-    baseline = "RI01-BL01",
-    activeBatch = "B",
+    acceptedBaseline = "RI01-BL02",
+    candidateBaseline = "RI01-BL03-CANDIDATE",
+    activeBatch = "C",
     status = "IN_IMPLEMENTATION",
     metricsMeter = OgfiMetrics.MeterName
 }));
 app.MapFoundationContextEndpoints();
+app.MapCatalogEndpoints();
+app.MapInventorySetupEndpoints();
+app.MapProcurementEndpoints();
 
 app.Run();
 

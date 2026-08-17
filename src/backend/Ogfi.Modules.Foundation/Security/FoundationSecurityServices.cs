@@ -63,6 +63,20 @@ public sealed class FoundationAuthorizationEvaluator(
             x => x.TenantId == tenantId && x.MembershipId == membershipId && x.OutletId == outletId,
             cancellationToken);
     }
+
+    public async Task<Guid[]> GetOutletScopeIdsAsync(CancellationToken cancellationToken)
+    {
+        if (!executionContext.IsResolved || executionContext.TenantId is not Guid tenantId || executionContext.MembershipId is not Guid membershipId)
+        {
+            return [];
+        }
+
+        return await dbContext.OutletScopeGrants
+            .Where(x => x.TenantId == tenantId && x.MembershipId == membershipId)
+            .Select(x => x.OutletId)
+            .Distinct()
+            .ToArrayAsync(cancellationToken);
+    }
 }
 
 public sealed class BusinessTimeResolver(

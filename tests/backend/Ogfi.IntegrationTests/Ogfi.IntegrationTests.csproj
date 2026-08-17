@@ -10,5 +10,8 @@
     <ProjectReference Include="../../../src/backend/Ogfi.Api/Ogfi.Api.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.BuildingBlocks/Ogfi.BuildingBlocks.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Catalog/Ogfi.Modules.Catalog.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
   </ItemGroup>
 </Project>
