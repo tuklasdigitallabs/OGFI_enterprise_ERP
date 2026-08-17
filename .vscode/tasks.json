@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "backend: build", "type": "shell", "command": "dotnet build OGFI.sln", "group": "build" },
+    { "label": "backend: test", "type": "shell", "command": "dotnet test OGFI.sln" },
+    { "label": "db: up", "type": "shell", "command": "docker compose up -d postgres" },
+    { "label": "db: migrate", "type": "shell", "command": "dotnet run --project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj" },
+    { "label": "frontend: dev", "type": "shell", "command": "pnpm --dir src/frontend/ogfi-web dev", "isBackground": true }
+  ]
+}

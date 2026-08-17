@@ -1,0 +1,59 @@
+name: RI-01 CI
+
+on:
+  push:
+    branches: [main, 'batch-a/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: ogfi
+          POSTGRES_USER: ogfi
+          POSTGRES_PASSWORD: ogfi_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ogfi -d ogfi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore
+        run: dotnet restore OGFI.sln
+      - name: Build
+        run: dotnet build OGFI.sln --no-restore -c Release
+      - name: Migrate clean database
+        run: dotnet run --project src/backend/Ogfi.Migrator/Ogfi.Migrator.csproj -c Release
+      - name: Test
+        run: dotnet test OGFI.sln --no-build -c Release
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend/ogfi-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.0.0 --activate
+      - name: Install scaffold dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Test
+        run: pnpm test -- --passWithNoTests

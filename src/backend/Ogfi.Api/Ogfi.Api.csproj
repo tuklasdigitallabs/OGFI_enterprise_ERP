@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../Ogfi.BuildingBlocks/Ogfi.BuildingBlocks.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Foundation/Ogfi.Modules.Foundation.csproj" />
+  </ItemGroup>
+</Project>

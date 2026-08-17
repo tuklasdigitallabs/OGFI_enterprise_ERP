@@ -1,0 +1,15 @@
+{
+  "referenceImplementationId": "RI-01",
+  "buildBaselineId": "RI01-BL01",
+  "architectureBaseline": "OGFI Master Approved Baseline v4.0 / G9.1",
+  "sourceRevision": "TO_BE_REPLACED_BY_CONTROLLED_BUILD_SHA",
+  "backend": ".NET 10 / ASP.NET Core / EF Core 10 / Npgsql 10",
+  "frontend": "React 19.2 / TypeScript / Vite 8 / Node 24 / pnpm 11",
+  "database": "PostgreSQL 18",
+  "schemaVersion": "BATCH_A_INITIAL",
+  "configurationBaseline": "RI01-CFG-INITIAL",
+  "enabledModules": ["Foundation"],
+  "activeBatch": "A",
+  "status": "IN_IMPLEMENTATION",
+  "knownExceptions": []
+}
