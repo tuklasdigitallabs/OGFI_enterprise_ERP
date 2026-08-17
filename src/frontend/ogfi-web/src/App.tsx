@@ -21,7 +21,14 @@ import {
   SupplierOffersPage,
   SuppliersPage,
 } from './pages/BatchCPages'
-import { ApprovalInboxPage, ApprovalTaskPage, BatchDOverviewPage } from './pages/BatchDPages'
+import { ApprovalInboxPage, ApprovalTaskPage } from './pages/BatchDPages'
+import {
+  BatchEOverviewPage,
+  GoodsReceiptDetailPage,
+  GoodsReceiptsPage,
+  InventoryMovementsPage,
+  StockPositionsPage,
+} from './pages/BatchEPages'
 
 const navigation = [
   ['Overview', '/overview'],
@@ -30,6 +37,9 @@ const navigation = [
   ['Supplier Offers', '/supplier-offers'],
   ['Purchase Orders', '/purchase-orders'],
   ['Approval Inbox', '/approvals'],
+  ['Goods Receipts', '/goods-receipts'],
+  ['Stock Positions', '/stock-positions'],
+  ['Inventory Movements', '/inventory-movements'],
   ['Inventory Setup', '/inventory-setup'],
 ] as const
 
@@ -44,8 +54,8 @@ function ApplicationShell() {
               RI-01 · Procure-to-Stock-to-Finance reference implementation
             </Typography>
           </Box>
-          <Chip label="RI01-BL04 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
-          <Chip label="Batch D" size="small" color="secondary" />
+          <Chip label="RI01-BL05 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
+          <Chip label="Batch E" size="small" color="secondary" />
         </Toolbar>
       </AppBar>
 
@@ -59,21 +69,14 @@ function ApplicationShell() {
             <Divider />
             <List disablePadding>
               {navigation.map(([label, to]) => (
-                <ListItemButton
-                  key={to}
-                  component={NavLink}
-                  to={to}
-                  sx={{ '&.active': { bgcolor: 'action.selected', borderRight: 3, borderColor: 'primary.main' } }}
-                >
+                <ListItemButton key={to} component={NavLink} to={to} sx={{ '&.active': { bgcolor: 'action.selected', borderRight: 3, borderColor: 'primary.main' } }}>
                   <ListItemText primary={label} />
                 </ListItemButton>
               ))}
             </List>
           </Paper>
 
-          <Box component="main" sx={{ flex: 1, minWidth: 0, width: '100%' }}>
-            <Outlet />
-          </Box>
+          <Box component="main" sx={{ flex: 1, minWidth: 0, width: '100%' }}><Outlet /></Box>
         </Stack>
       </Container>
     </Box>
@@ -86,7 +89,7 @@ export function App() {
       <Routes>
         <Route element={<ApplicationShell />}>
           <Route index element={<Navigate to="/overview" replace />} />
-          <Route path="/overview" element={<BatchDOverviewPage />} />
+          <Route path="/overview" element={<BatchEOverviewPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/suppliers" element={<SuppliersPage />} />
           <Route path="/supplier-offers" element={<SupplierOffersPage />} />
@@ -94,6 +97,10 @@ export function App() {
           <Route path="/purchase-orders/:purchaseOrderId" element={<PurchaseOrderDetailPage />} />
           <Route path="/approvals" element={<ApprovalInboxPage />} />
           <Route path="/approvals/:taskId" element={<ApprovalTaskPage />} />
+          <Route path="/goods-receipts" element={<GoodsReceiptsPage />} />
+          <Route path="/goods-receipts/:goodsReceiptId" element={<GoodsReceiptDetailPage />} />
+          <Route path="/stock-positions" element={<StockPositionsPage />} />
+          <Route path="/inventory-movements" element={<InventoryMovementsPage />} />
           <Route path="/inventory-setup" element={<InventorySetupPage />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Route>
