@@ -112,7 +112,7 @@ describe('Batch D application workspace', () => {
     await user.click(screen.getByRole('link', { name: 'Review' }))
 
     expect(await screen.findByText('Purchase Order Approval')).toBeTruthy()
-    expect(screen.getByText('5400')).toBeTruthy()
+    expect(screen.getByText(/PHP 5,400/)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Approve Purchase Order' }))
     expect(await screen.findByText(/Workflow decision recorded immutably as APPROVED/i)).toBeTruthy()
   })
