@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Ogfi.BuildingBlocks.Multitenancy;
 
@@ -11,7 +12,7 @@ public sealed class TestAuthenticationHandler(
     ILoggerFactory logger,
     UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
-    public const string Scheme = "OGFI-Test";
+    public const string SchemeName = "OGFI-Test";
     public const string SubjectHeader = "X-Test-Subject";
     public const string TenantHeader = "X-Test-Tenant-Id";
 
@@ -28,8 +29,8 @@ public sealed class TestAuthenticationHandler(
             new Claim(ClaimTypes.NameIdentifier, subject.ToString()),
             new Claim(OgfiClaimTypes.TenantId, tenant.ToString())
         };
-        var identity = new ClaimsIdentity(claims, Scheme);
+        var identity = new ClaimsIdentity(claims, SchemeName);
         var principal = new ClaimsPrincipal(identity);
-        return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, Scheme)));
+        return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, SchemeName)));
     }
 }

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using Ogfi.Modules.Foundation.Persistence;
+using Xunit;
 
 namespace Ogfi.IntegrationTests;
 
@@ -48,14 +49,14 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
             services.AddSingleton<TimeProvider>(new FixedTimeProvider(FixedUtcNow));
             services.AddAuthentication(options =>
                 {
-                    options.DefaultAuthenticateScheme = TestAuthenticationHandler.Scheme;
-                    options.DefaultChallengeScheme = TestAuthenticationHandler.Scheme;
+                    options.DefaultAuthenticateScheme = TestAuthenticationHandler.SchemeName;
+                    options.DefaultChallengeScheme = TestAuthenticationHandler.SchemeName;
                 })
-                .AddScheme<AuthenticationSchemeOptions, TestAuthenticationHandler>(TestAuthenticationHandler.Scheme, _ => { });
+                .AddScheme<AuthenticationSchemeOptions, TestAuthenticationHandler>(TestAuthenticationHandler.SchemeName, _ => { });
         });
     }
 
-    public async Task InitializeAsync()
+    async Task IAsyncLifetime.InitializeAsync()
     {
         await using (var scope = Services.CreateAsyncScope())
         {
@@ -66,7 +67,11 @@ public sealed class SecuritySpineFixture : WebApplicationFactory<Program>, IAsyn
         await SeedAsync();
     }
 
-    public new Task DisposeAsync() => Task.CompletedTask;
+    Task IAsyncLifetime.DisposeAsync()
+    {
+        Dispose();
+        return Task.CompletedTask;
+    }
 
     public HttpClient CreateAuthenticatedClient(string subject, Guid tenantId)
     {
