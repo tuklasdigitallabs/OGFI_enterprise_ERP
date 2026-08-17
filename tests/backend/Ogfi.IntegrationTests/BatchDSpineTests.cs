@@ -1,8 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Ogfi.Modules.Catalog;
+using Ogfi.Modules.Workflow.Persistence;
 using Xunit;
 
 namespace Ogfi.IntegrationTests;
@@ -168,6 +171,14 @@ public sealed class BatchDSpineTests(BatchDFixture fixture) : IClassFixture<Batc
         var exception = await Assert.ThrowsAsync<PostgresException>(() =>
             fixture.AttemptCrossTenantWorkflowDefinitionInsertAsRuntimeRoleAsync(BatchDFixture.TenantA, BatchDFixture.TenantB));
         Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+    }
+
+    [Fact]
+    public async Task Workflow_model_snapshot_matches_runtime_model()
+    {
+        await using var scope = fixture.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<WorkflowDbContext>();
+        Assert.False(dbContext.Database.HasPendingModelChanges());
     }
 
     private static async Task<Guid> CreateSubmittedPurchaseOrderAsync(HttpClient client, string marker)
