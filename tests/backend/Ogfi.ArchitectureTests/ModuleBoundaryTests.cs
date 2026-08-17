@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace Ogfi.ArchitectureTests;
 
 public sealed class ModuleBoundaryTests
