@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   backend:
@@ -89,18 +89,8 @@ jobs:
         with:
           name: ri01-openapi
           path: artifacts/openapi
-      - name: Update dependency lock for approved client generator
-        run: pnpm install --no-frozen-lockfile
-      - name: Bootstrap updated source-controlled lockfile
-        if: github.event_name == 'push' && github.ref_name == 'batch-a/executable-skeleton'
-        run: |
-          if ! git diff --quiet pnpm-lock.yaml; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add pnpm-lock.yaml
-            git commit -m "chore(frontend): lock OpenAPI client dependencies"
-            git push origin HEAD:${GITHUB_REF_NAME}
-          fi
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
       - name: Generate TypeScript API types from controlled OpenAPI artifact
         run: pnpm api:generate
       - name: Build
@@ -129,7 +119,8 @@ jobs:
             "githubRunId": "${GITHUB_RUN_ID}",
             "backendSdk": ".NET SDK 10.0.400",
             "backendPackages": "ASP.NET Core/EF Core 10.x; Npgsql EF 10.x",
-            "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8",
+            "frontendToolchain": "Node 24 / pnpm 11.18.0 / React 19.2 / Vite 8 / TypeScript 5.9.3",
+            "apiClientGeneration": "ASP.NET OpenAPI -> openapi-typescript 7.13 -> openapi-fetch 0.17",
             "database": "PostgreSQL 18",
             "schemaVersion": "202608170001_InitialFoundation",
             "configurationBaseline": "RI01-CFG-INITIAL",
