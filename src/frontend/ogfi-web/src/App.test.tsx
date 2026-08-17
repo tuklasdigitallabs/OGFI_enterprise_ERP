@@ -40,7 +40,8 @@ describe('Batch C application workspace', () => {
 
     expect(screen.getByText('OGFI Enterprise ERP')).toBeTruthy()
     expect(screen.getByText('Batch C · Purchasing Master-Data Spine')).toBeTruthy()
-    expect(screen.getByText('Purchase Orders')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Purchase Orders' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Purchase Orders' })).toBeTruthy()
     expect(screen.queryByLabelText(/tenant id/i)).toBeNull()
   })
 
