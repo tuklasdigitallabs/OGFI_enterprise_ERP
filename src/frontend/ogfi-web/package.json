@@ -1,0 +1,30 @@
+{
+  "name": "@ogfi/web",
+  "private": true,
+  "version": "0.0.0-ri01",
+  "type": "module",
+  "packageManager": "pnpm@11.18.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "vite",
+    "api:generate": "openapi-typescript ../../../artifacts/openapi/ogfi-v1.json -o src/api/schema.d.ts",
+    "build": "tsc -b && vite build",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.4",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  }
+}
