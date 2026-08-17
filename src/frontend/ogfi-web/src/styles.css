@@ -1,10 +1,4 @@
-:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #15171a; background: #f5f6f8; }
 * { box-sizing: border-box; }
+html, body, #root { min-height: 100%; }
 body { margin: 0; }
-.shell { min-height: 100vh; display: grid; place-items: center; padding: 2rem; }
-.card { width: min(720px, 100%); background: white; border: 1px solid #e2e5e9; border-radius: 18px; padding: 2.5rem; box-shadow: 0 18px 50px rgba(0,0,0,.06); }
-.eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: .78rem; font-weight: 700; color: #606872; }
-h1 { margin: .5rem 0 1rem; font-size: clamp(2rem, 5vw, 3.6rem); }
-dl { margin-top: 2rem; display: grid; gap: .8rem; }
-dl div { display: flex; justify-content: space-between; gap: 1rem; padding-top: .8rem; border-top: 1px solid #eceef1; }
-dt { color: #606872; } dd { margin: 0; font-weight: 650; }
+a { color: inherit; }
