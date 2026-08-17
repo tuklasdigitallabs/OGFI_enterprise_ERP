@@ -34,6 +34,15 @@ jobs:
       ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev
     steps:
       - uses: actions/checkout@v4
+      - name: Install approved .NET SDK 10.0.400
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dotnet"
+          curl --fail --location --retry 5 --retry-all-errors \
+            https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-linux-x64.tar.gz \
+            -o "${RUNNER_TEMP}/dotnet-sdk.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/dotnet-sdk.tar.gz" -C "${RUNNER_TEMP}/dotnet"
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
       - name: Verify approved .NET SDK
         run: |
           ACTUAL="$(dotnet --version)"
