@@ -16,6 +16,22 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
     {
         using var client = fixture.CreateAuthenticatedClient();
 
+        using (var bounded = await client.GetAsync("/api/catalog/uoms?limit=1"))
+        {
+            bounded.EnsureSuccessStatusCode();
+            Assert.Equal("1", bounded.Headers.GetValues("X-OGFI-Page-Limit").Single());
+            using var json = JsonDocument.Parse(await bounded.Content.ReadAsStringAsync());
+            Assert.Equal(1, json.RootElement.GetArrayLength());
+        }
+
+        using (var filtered = await client.GetAsync("/api/catalog/uoms?q=KG&limit=50"))
+        {
+            filtered.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await filtered.Content.ReadAsStringAsync());
+            Assert.Single(json.RootElement.EnumerateArray());
+            Assert.Equal("KG", json.RootElement[0].GetProperty("code").GetString());
+        }
+
         using var standard = await client.PostAsJsonAsync("/api/catalog/uom-conversions/preview", new
         {
             quantity = 1000m,
@@ -81,6 +97,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             using var json = JsonDocument.Parse(await profile.Content.ReadAsStringAsync());
             Assert.Equal(UomIds.Kilogram, json.RootElement.GetProperty("baseUomId").GetGuid());
             Assert.False(json.RootElement.GetProperty("negativeStockAllowed").GetBoolean());
+            Assert.False(json.RootElement.TryGetProperty("tenantId", out _));
         }
 
         using (var location = await client.PostAsJsonAsync("/api/inventory/stock-locations", new
@@ -111,6 +128,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             offerId = json.RootElement.GetProperty("id").GetGuid();
             Assert.Equal(10L, json.RootElement.GetProperty("conversionNumerator").GetInt64());
             Assert.Equal("KG", json.RootElement.GetProperty("baseUomCodeSnapshot").GetString());
+            Assert.False(json.RootElement.TryGetProperty("tenantId", out _));
         }
 
         Guid poId;
@@ -128,7 +146,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             poEtag = RequireEtag(createPo);
             using var json = JsonDocument.Parse(await createPo.Content.ReadAsStringAsync());
             poId = json.RootElement.GetProperty("id").GetGuid();
-            Assert.Equal(1, json.RootElement.GetProperty("version").GetInt64());
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
             Assert.Equal(3600m, json.RootElement.GetProperty("totalNetAmount").GetDecimal());
             Assert.Equal($"Fresh Supplier {suffix}", json.RootElement.GetProperty("supplierNameSnapshot").GetString());
             var line = json.RootElement.GetProperty("lines")[0];
@@ -145,10 +163,14 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
         using (var updateItem = await SendJsonWithIfMatchAsync(client, HttpMethod.Put, $"/api/catalog/items/{item.Id}", item.ETag, new { name = $"Tomato Updated {suffix}" }))
         {
             updateItem.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await updateItem.Content.ReadAsStringAsync());
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
         }
         using (var updateSupplier = await SendJsonWithIfMatchAsync(client, HttpMethod.Put, $"/api/procurement/suppliers/{supplier.Id}", supplier.ETag, new { name = $"Fresh Supplier Updated {suffix}" }))
         {
             updateSupplier.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await updateSupplier.Content.ReadAsStringAsync());
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
         }
 
         using (var historicalPo = await client.GetAsync($"/api/procurement/purchase-orders/{poId}"))
@@ -156,7 +178,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             historicalPo.EnsureSuccessStatusCode();
             poEtag = RequireEtag(historicalPo);
             using var json = JsonDocument.Parse(await historicalPo.Content.ReadAsStringAsync());
-            Assert.Equal(1, json.RootElement.GetProperty("version").GetInt64());
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
             Assert.Equal($"Fresh Supplier {suffix}", json.RootElement.GetProperty("supplierNameSnapshot").GetString());
             Assert.Equal($"Tomato {suffix}", json.RootElement.GetProperty("lines")[0].GetProperty("catalogItemNameSnapshot").GetString());
         }
@@ -171,6 +193,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             Assert.True(updatePo.IsSuccessStatusCode, $"PO update failed with {(int)updatePo.StatusCode}: {body}");
             updatedPoEtag = RequireEtag(updatePo);
             using var json = JsonDocument.Parse(body);
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
             Assert.Equal(5400m, json.RootElement.GetProperty("totalNetAmount").GetDecimal());
         }
 
@@ -189,6 +212,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
             submit.EnsureSuccessStatusCode();
             submittedEtag = RequireEtag(submit);
             using var json = JsonDocument.Parse(await submit.Content.ReadAsStringAsync());
+            Assert.False(json.RootElement.TryGetProperty("version", out _));
             Assert.Equal("SUBMITTED", json.RootElement.GetProperty("status").GetString());
             Assert.Equal(5400m, json.RootElement.GetProperty("totalNetAmount").GetDecimal());
             Assert.Equal("2026-08-17", json.RootElement.GetProperty("businessDate").GetString());
@@ -198,6 +222,15 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
         {
             Assert.Equal(HttpStatusCode.UnprocessableEntity, duplicateSubmit.StatusCode);
             Assert.Equal("PROCUREMENT.PO.NOT_APPROVABLE", await ReadErrorCodeAsync(duplicateSubmit));
+        }
+
+        using (var listPo = await client.GetAsync($"/api/procurement/purchase-orders?q={suffix}&limit=1"))
+        {
+            listPo.EnsureSuccessStatusCode();
+            Assert.Equal("1", listPo.Headers.GetValues("X-OGFI-Page-Limit").Single());
+            using var json = JsonDocument.Parse(await listPo.Content.ReadAsStringAsync());
+            Assert.True(json.RootElement.GetArrayLength() <= 1);
+            Assert.All(json.RootElement.EnumerateArray(), row => Assert.False(row.TryGetProperty("version", out _)));
         }
 
         Assert.Equal(1, await fixture.CountApprovalRequestsAsync(poId));
@@ -244,6 +277,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var etag = RequireEtag(response);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(json.RootElement.TryGetProperty("version", out _));
         return (json.RootElement.GetProperty("id").GetGuid(), etag);
     }
 
@@ -253,6 +287,7 @@ public sealed class BatchCSpineTests(BatchCFixture fixture) : IClassFixture<Batc
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var etag = RequireEtag(response);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(json.RootElement.TryGetProperty("version", out _));
         return (json.RootElement.GetProperty("id").GetGuid(), etag);
     }
 
