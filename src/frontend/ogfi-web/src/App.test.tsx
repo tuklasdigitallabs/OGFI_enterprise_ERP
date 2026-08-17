@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
@@ -19,6 +19,7 @@ const server = setupServer(
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
+  cleanup()
   server.resetHandlers()
   window.history.pushState({}, '', '/overview')
 })
@@ -46,8 +47,11 @@ describe('Batch C application workspace', () => {
   })
 
   it('renders Catalog data through the typed API path and validates create form input', async () => {
-    window.history.pushState({}, '', '/catalog')
+    window.history.pushState({}, '', '/overview')
     renderApp()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('link', { name: 'Catalog' }))
 
     expect(await screen.findByText('Test Tomato')).toBeTruthy()
     expect(screen.getByText('KG')).toBeTruthy()
@@ -58,7 +62,6 @@ describe('Batch C application workspace', () => {
     expect(await screen.findByText('Code is required')).toBeTruthy()
     expect(screen.getByText('Name is required')).toBeTruthy()
 
-    const user = userEvent.setup()
     await user.type(screen.getByLabelText('Code'), 'NEW-ITEM')
     await user.type(screen.getByLabelText('Name'), 'New Item')
     expect(screen.getByDisplayValue('NEW-ITEM')).toBeTruthy()
