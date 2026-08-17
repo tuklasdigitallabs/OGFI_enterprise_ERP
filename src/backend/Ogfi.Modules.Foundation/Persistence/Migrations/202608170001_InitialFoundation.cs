@@ -1,10 +1,13 @@
 using System;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace Ogfi.Modules.Foundation.Persistence.Migrations;
 
+[DbContext(typeof(FoundationDbContext))]
+[Migration("202608170001_InitialFoundation")]
 public partial class InitialFoundation : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)

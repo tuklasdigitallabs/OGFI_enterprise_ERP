@@ -53,13 +53,7 @@ jobs:
       - run: corepack prepare pnpm@11.18.0 --activate
       - name: Install scaffold dependencies
         run: pnpm install --no-frozen-lockfile
-      - name: Capture generated lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: batch-a-pnpm-lock
-          path: src/frontend/ogfi-web/pnpm-lock.yaml
-          if-no-files-found: error
       - name: Build
         run: pnpm build
       - name: Test
-        run: pnpm test -- --passWithNoTests
+        run: pnpm test
