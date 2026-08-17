@@ -144,27 +144,36 @@ jobs:
       - name: Generate controlled Reference Build Manifest
         run: |
           SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$SOURCE_BRANCH" == batch-c/* ]]; then
+          if [[ "$SOURCE_BRANCH" == batch-d/* ]]; then
+            BUILD_BASELINE="RI01-BL04-CANDIDATE"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.4 / G9.5 Implementation Architecture"
+            ACTIVE_BATCH="D"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency|Workflow:20260818061100_WorkflowTenantRls"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement","Workflow"]'
+          elif [[ "$SOURCE_BRANCH" == batch-c/* ]]; then
             BUILD_BASELINE="RI01-BL03-CANDIDATE"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.3 / G9.4"
             ACTIVE_BATCH="C"
             SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency"
             ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement"]'
           elif [[ "$SOURCE_BRANCH" == batch-b/* ]]; then
             BUILD_BASELINE="RI01-BL02-CANDIDATE"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.1 / G9.2"
             ACTIVE_BATCH="B"
             SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
             ENABLED_MODULES='["Foundation"]'
           else
-            BUILD_BASELINE="RI01-BL02"
-            ACTIVE_BATCH="C"
-            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
-            ENABLED_MODULES='["Foundation"]'
+            BUILD_BASELINE="RI01-BL03"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.3 / G9.4"
+            ACTIVE_BATCH="D"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement"]'
           fi
           cat > RI01-build-manifest.json <<EOF
           {
             "referenceImplementationId": "RI-01",
             "buildBaselineId": "${BUILD_BASELINE}",
-            "architectureBaseline": "OGFI Master Approved Baseline v4.2 / G9.3",
+            "architectureBaseline": "${ARCHITECTURE_BASELINE}",
             "sourceRevision": "${GITHUB_SHA}",
             "sourceBranch": "${SOURCE_BRANCH}",
             "githubRunId": "${GITHUB_RUN_ID}",

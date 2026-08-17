@@ -9,16 +9,19 @@ public sealed class ModuleBoundaryTests
     {
         AssertNoBusinessModuleReferences(
             typeof(Ogfi.Modules.Foundation.Persistence.FoundationDbContext).Assembly,
-            "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+            "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Workflow", "Ogfi.Modules.Finance");
         AssertNoBusinessModuleReferences(
             typeof(Ogfi.Modules.Catalog.Persistence.CatalogDbContext).Assembly,
-            "Ogfi.Modules.Foundation", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Workflow", "Ogfi.Modules.Finance");
         AssertNoBusinessModuleReferences(
             typeof(Ogfi.Modules.Inventory.Persistence.InventoryDbContext).Assembly,
-            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Procurement", "Ogfi.Modules.Workflow", "Ogfi.Modules.Finance");
         AssertNoBusinessModuleReferences(
             typeof(Ogfi.Modules.Procurement.Persistence.ProcurementDbContext).Assembly,
-            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Finance");
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Workflow", "Ogfi.Modules.Finance");
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Workflow.Persistence.WorkflowDbContext).Assembly,
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
     }
 
     private static void AssertNoBusinessModuleReferences(System.Reflection.Assembly assembly, params string[] forbidden)

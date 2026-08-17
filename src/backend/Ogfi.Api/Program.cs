@@ -12,6 +12,8 @@ using Ogfi.Modules.Foundation.Security;
 using Ogfi.Modules.Inventory.Persistence;
 using Ogfi.Modules.Procurement;
 using Ogfi.Modules.Procurement.Persistence;
+using Ogfi.Modules.Workflow;
+using Ogfi.Modules.Workflow.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,9 +46,11 @@ builder.Services.AddScoped<MembershipResolver>();
 builder.Services.AddScoped<FoundationAuthorizationEvaluator>();
 builder.Services.AddScoped<BusinessTimeResolver>();
 builder.Services.AddScoped<FoundationOrganizationReferenceService>();
+builder.Services.AddScoped<FoundationApproverResolver>();
 builder.Services.AddScoped<CatalogReferenceService>();
 builder.Services.AddScoped<StandardUomConversionService>();
 builder.Services.AddScoped<PurchaseOrderService>();
+builder.Services.AddScoped<WorkflowApprovalService>();
 builder.Services.AddSingleton(TimeProvider.System);
 
 var connectionString = builder.Configuration.GetConnectionString("Postgres")
@@ -60,12 +64,15 @@ builder.Services.AddDbContext<InventoryDbContext>((serviceProvider, options) =>
     options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddDbContext<ProcurementDbContext>((serviceProvider, options) =>
     options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddDbContext<WorkflowDbContext>((serviceProvider, options) =>
+    options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetRequiredService<TenantSessionConnectionInterceptor>()));
 
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<FoundationDbContext>("foundation-db")
     .AddDbContextCheck<CatalogDbContext>("catalog-db")
     .AddDbContextCheck<InventoryDbContext>("inventory-db")
-    .AddDbContextCheck<ProcurementDbContext>("procurement-db");
+    .AddDbContextCheck<ProcurementDbContext>("procurement-db")
+    .AddDbContextCheck<WorkflowDbContext>("workflow-db");
 
 var app = builder.Build();
 
@@ -115,9 +122,10 @@ app.MapHealthChecks("/health/ready");
 app.MapGet("/api/system/info", () => Results.Ok(new
 {
     referenceImplementation = "RI-01",
-    acceptedBaseline = "RI01-BL02",
-    candidateBaseline = "RI01-BL03-CANDIDATE",
-    activeBatch = "C",
+    acceptedBaseline = "RI01-BL03",
+    candidateBaseline = "RI01-BL04-CANDIDATE",
+    architectureBaseline = "OGFI Master Approved Baseline v4.4 / G9.5",
+    activeBatch = "D",
     status = "IN_IMPLEMENTATION",
     metricsMeter = OgfiMetrics.MeterName
 }));
@@ -125,6 +133,7 @@ app.MapFoundationContextEndpoints();
 app.MapCatalogEndpoints();
 app.MapInventorySetupEndpoints();
 app.MapProcurementEndpoints();
+app.MapWorkflowEndpoints();
 
 app.Run();
 

@@ -7,6 +7,7 @@ public static class ProcurementPermissionCodes
     public const string PurchaseOrderRead = "procurement.purchase_order.read";
     public const string PurchaseOrderWrite = "procurement.purchase_order.write";
     public const string PurchaseOrderSubmit = "procurement.purchase_order.submit";
+    public const string PurchaseOrderApprove = "procurement.purchase_order.approve";
 }
 
 public static class ProcurementStatuses
@@ -15,6 +16,7 @@ public static class ProcurementStatuses
     public const string Inactive = "INACTIVE";
     public const string Draft = "DRAFT";
     public const string Submitted = "SUBMITTED";
+    public const string Approved = "APPROVED";
 }
 
 public sealed class Supplier
@@ -123,6 +125,17 @@ public sealed record PurchaseOrderApprovalRequestedV1(
     PurchaseOrderApprovalContext ApprovalContext,
     string CorrelationId,
     DateTimeOffset OccurredAtUtc);
+
+public sealed record PurchaseOrderApprovalOutcome(
+    Guid WorkflowInstanceId,
+    Guid WorkflowTaskId,
+    Guid PurchaseOrderId,
+    int ApprovalRound,
+    long SubjectVersion,
+    string Decision,
+    Guid ActorUserId,
+    DateTimeOffset DecidedAtUtc,
+    string CorrelationId);
 
 public sealed class ProcurementRuleException(string code, string message) : Exception(message)
 {
