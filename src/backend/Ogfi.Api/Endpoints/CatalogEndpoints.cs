@@ -11,13 +11,20 @@ public static class CatalogEndpoints
 {
     public static IEndpointRouteBuilder MapCatalogEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/catalog/uoms", ListUomsAsync).RequireAuthorization();
-        endpoints.MapPost("/api/catalog/uom-conversions/preview", ConvertUomAsync).RequireAuthorization();
-        endpoints.MapGet("/api/catalog/items", ListItemsAsync).RequireAuthorization();
-        endpoints.MapGet("/api/catalog/items/{itemId:guid}", GetItemAsync).RequireAuthorization();
-        endpoints.MapPost("/api/catalog/items", CreateItemAsync).RequireAuthorization();
-        endpoints.MapPut("/api/catalog/items/{itemId:guid}", UpdateItemAsync).RequireAuthorization();
-        endpoints.MapPost("/api/catalog/items/{itemId:guid}/packaging-conversions", CreatePackagingConversionAsync).RequireAuthorization();
+        endpoints.MapGet("/api/catalog/uoms", ListUomsAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<UomResponse>>();
+        endpoints.MapPost("/api/catalog/uom-conversions/preview", ConvertUomAsync)
+            .RequireAuthorization().Produces<UomConversionResponse>();
+        endpoints.MapGet("/api/catalog/items", ListItemsAsync)
+            .RequireAuthorization().Produces<IReadOnlyList<CatalogItemResponse>>();
+        endpoints.MapGet("/api/catalog/items/{itemId:guid}", GetItemAsync)
+            .RequireAuthorization().Produces<CatalogItemResponse>().Produces(StatusCodes.Status404NotFound);
+        endpoints.MapPost("/api/catalog/items", CreateItemAsync)
+            .RequireAuthorization().Produces<CatalogItemResponse>(StatusCodes.Status201Created);
+        endpoints.MapPut("/api/catalog/items/{itemId:guid}", UpdateItemAsync)
+            .RequireAuthorization().Produces<CatalogItemResponse>();
+        endpoints.MapPost("/api/catalog/items/{itemId:guid}/packaging-conversions", CreatePackagingConversionAsync)
+            .RequireAuthorization().Produces<PackagingConversionResponse>(StatusCodes.Status201Created);
         return endpoints;
     }
 
@@ -43,7 +50,7 @@ public static class CatalogEndpoints
         }
         var rows = await query.OrderBy(x => x.Code)
             .Skip(page.Offset).Take(page.Limit)
-            .Select(x => new { x.Id, x.Code, x.Name, x.DimensionCode, x.PrecisionScale })
+            .Select(x => new UomResponse(x.Id, x.Code, x.Name, x.DimensionCode, x.PrecisionScale))
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
     }
@@ -66,7 +73,7 @@ public static class CatalogEndpoints
         var converted = await conversion.ConvertAsync(request.Quantity, request.FromUomId, request.ToUomId, cancellationToken);
         return converted is null
             ? EndpointSupport.Problem(httpContext, 422, "CATALOG.UOM.CONVERSION_MISSING", "No standard same-dimension conversion exists.")
-            : Results.Ok(new { request.Quantity, request.FromUomId, request.ToUomId, convertedQuantity = converted.Value });
+            : Results.Ok(new UomConversionResponse(request.Quantity, request.FromUomId, request.ToUomId, converted.Value));
     }
 
     private static async Task<IResult> ListItemsAsync(
@@ -94,7 +101,7 @@ public static class CatalogEndpoints
             from item in itemQuery
             join uom in db.Uoms.AsNoTracking() on item.BaseUomId equals uom.Id
             orderby item.Code
-            select new { item.Id, item.Code, item.Name, item.BaseUomId, baseUomCode = uom.Code, item.Status })
+            select new CatalogItemResponse(item.Id, item.Code, item.Name, item.BaseUomId, uom.Code, item.Status))
             .Skip(page.Offset).Take(page.Limit)
             .ToListAsync(cancellationToken);
         return Results.Ok(rows);
@@ -115,7 +122,8 @@ public static class CatalogEndpoints
         var item = await catalog.GetItemAsync(itemId, cancellationToken);
         if (item is null) return Results.NotFound();
         httpContext.Response.Headers.ETag = EndpointSupport.ToEtag(item.Version);
-        return Results.Ok(new { item.CatalogItemId, item.ItemCode, item.ItemName, item.BaseUomId, item.BaseUomCode });
+        return Results.Ok(new CatalogItemResponse(
+            item.CatalogItemId, item.ItemCode, item.ItemName, item.BaseUomId, item.BaseUomCode, CatalogStatuses.Active));
     }
 
     private static async Task<IResult> CreateItemAsync(
@@ -150,10 +158,8 @@ public static class CatalogEndpoints
         db.CatalogItems.Add(item);
         await db.SaveChangesAsync(cancellationToken);
         httpContext.Response.Headers.ETag = EndpointSupport.ToEtag(item.Version);
-        return Results.Created($"/api/catalog/items/{item.Id}", new
-        {
-            item.Id, item.Code, item.Name, item.BaseUomId, baseUomCode = baseUom.Code, item.Status
-        });
+        return Results.Created($"/api/catalog/items/{item.Id}",
+            new CatalogItemResponse(item.Id, item.Code, item.Name, item.BaseUomId, baseUom.Code, item.Status));
     }
 
     private static async Task<IResult> UpdateItemAsync(
@@ -189,8 +195,9 @@ public static class CatalogEndpoints
         {
             return EndpointSupport.Problem(httpContext, 409, "CONCURRENCY.CONFLICT", "Catalog Item was modified by another request.");
         }
+        var baseUomCode = await db.Uoms.AsNoTracking().Where(x => x.Id == item.BaseUomId).Select(x => x.Code).SingleAsync(cancellationToken);
         httpContext.Response.Headers.ETag = EndpointSupport.ToEtag(item.Version);
-        return Results.Ok(new { item.Id, item.Code, item.Name, item.BaseUomId, item.Status });
+        return Results.Ok(new CatalogItemResponse(item.Id, item.Code, item.Name, item.BaseUomId, baseUomCode, item.Status));
     }
 
     private static async Task<IResult> CreatePackagingConversionAsync(
@@ -234,11 +241,9 @@ public static class CatalogEndpoints
         };
         db.PackagingConversions.Add(row);
         await db.SaveChangesAsync(cancellationToken);
-        return Results.Created($"/api/catalog/items/{item.Id}/packaging-conversions/{row.Id}", new
-        {
-            row.Id, row.CatalogItemId, row.PurchaseUomId, row.BaseUomId,
-            row.Numerator, row.Denominator, row.EffectiveFromBusinessDate, row.EffectiveToBusinessDate
-        });
+        return Results.Created($"/api/catalog/items/{item.Id}/packaging-conversions/{row.Id}",
+            new PackagingConversionResponse(row.Id, row.CatalogItemId, row.PurchaseUomId, row.BaseUomId,
+                row.Numerator, row.Denominator, row.EffectiveFromBusinessDate, row.EffectiveToBusinessDate));
     }
 }
 
