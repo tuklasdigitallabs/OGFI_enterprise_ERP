@@ -11,16 +11,16 @@ public sealed class TenantSessionConnectionInterceptor(ITenantExecutionContextAc
         ConnectionEndEventData eventData,
         CancellationToken cancellationToken = default)
     {
-        if (executionContext.TenantId is not Guid tenantId)
-        {
-            return;
-        }
+        // Npgsql pools physical connections. Always overwrite the session-scoped tenant GUC
+        // on every logical open so a previously used tenant context can never leak into a
+        // later tenant-less or different-tenant request.
+        var tenantValue = executionContext.TenantId?.ToString() ?? string.Empty;
 
         await using var command = connection.CreateCommand();
         command.CommandText = "select set_config('app.tenant_id', @tenant_id, false);";
         var parameter = command.CreateParameter();
         parameter.ParameterName = "tenant_id";
-        parameter.Value = tenantId.ToString();
+        parameter.Value = tenantValue;
         command.Parameters.Add(parameter);
         await command.ExecuteScalarAsync(cancellationToken);
     }
