@@ -40,6 +40,7 @@ public sealed class CatalogItem
     public required string Name { get; set; }
     public Guid BaseUomId { get; set; }
     public required string Status { get; set; }
+    public long Version { get; set; } = 1;
 }
 
 public sealed class ItemPackagingConversion
@@ -60,7 +61,8 @@ public sealed record CatalogItemReference(
     string ItemCode,
     string ItemName,
     Guid BaseUomId,
-    string BaseUomCode);
+    string BaseUomCode,
+    long Version);
 
 public sealed record PurchaseConversionReference(
     Guid CatalogItemId,

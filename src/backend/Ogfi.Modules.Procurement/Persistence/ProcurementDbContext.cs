@@ -23,6 +23,7 @@ public sealed class ProcurementDbContext(DbContextOptions<ProcurementDbContext> 
             entity.Property(x => x.Code).HasMaxLength(60);
             entity.Property(x => x.Name).HasMaxLength(200);
             entity.Property(x => x.Status).HasMaxLength(20);
+            entity.Property(x => x.Version).IsConcurrencyToken();
             entity.HasIndex(x => new { x.TenantId, x.Code }).IsUnique();
         });
 

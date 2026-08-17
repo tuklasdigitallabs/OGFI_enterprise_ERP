@@ -22,10 +22,43 @@ public sealed class PurchaseOrderService(ProcurementDbContext dbContext)
             TenantId = tenantId,
             Code = normalizedCode,
             Name = RequiredText(name, "Supplier name"),
-            Status = ProcurementStatuses.Active
+            Status = ProcurementStatuses.Active,
+            Version = 1
         };
         dbContext.Suppliers.Add(supplier);
         await dbContext.SaveChangesAsync(cancellationToken);
+        return supplier;
+    }
+
+    public async Task<Supplier> UpdateSupplierAsync(
+        Guid tenantId,
+        Guid supplierId,
+        long expectedVersion,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        var supplier = await dbContext.Suppliers.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == supplierId,
+            cancellationToken);
+        if (supplier is null)
+        {
+            throw new ProcurementRuleException("PROCUREMENT.SUPPLIER.NOT_FOUND", "Supplier does not exist.");
+        }
+        if (supplier.Version != expectedVersion)
+        {
+            throw new ProcurementRuleException("CONCURRENCY.CONFLICT", "Supplier version does not match If-Match.");
+        }
+
+        supplier.Name = RequiredText(name, "Supplier name");
+        supplier.Version++;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ProcurementRuleException("CONCURRENCY.CONFLICT", "Supplier was modified by another request.");
+        }
         return supplier;
     }
 
@@ -229,8 +262,7 @@ public sealed class PurchaseOrderService(ProcurementDbContext dbContext)
             po.LegalEntityId,
             po.OutletId,
             businessDate.Value,
-            po.TotalNetAmount,
-            po.Currency,
+            new PurchaseOrderApprovalContext(po.TotalNetAmount, po.Currency, po.OutletId, userId),
             correlationId,
             occurredAtUtc);
 

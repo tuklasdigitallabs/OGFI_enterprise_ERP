@@ -24,6 +24,7 @@ public sealed class Supplier
     public required string Code { get; set; }
     public required string Name { get; set; }
     public required string Status { get; set; }
+    public long Version { get; set; } = 1;
 }
 
 public sealed class SupplierOffer
@@ -103,6 +104,12 @@ public sealed record SupplierOfferReferenceInput(
 
 public sealed record PurchaseOrderLineInput(Guid SupplierOfferId, decimal Quantity);
 
+public sealed record PurchaseOrderApprovalContext(
+    decimal PurchaseOrderTotal,
+    string Currency,
+    Guid OutletId,
+    Guid RequesterUserId);
+
 public sealed record PurchaseOrderApprovalRequestedV1(
     Guid EventId,
     Guid TenantId,
@@ -113,8 +120,7 @@ public sealed record PurchaseOrderApprovalRequestedV1(
     Guid LegalEntityId,
     Guid OutletId,
     DateOnly BusinessDate,
-    decimal PurchaseOrderTotal,
-    string Currency,
+    PurchaseOrderApprovalContext ApprovalContext,
     string CorrelationId,
     DateTimeOffset OccurredAtUtc);
 

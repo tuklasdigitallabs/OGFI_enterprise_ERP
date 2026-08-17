@@ -41,6 +41,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             entity.Property(x => x.Code).HasMaxLength(60);
             entity.Property(x => x.Name).HasMaxLength(200);
             entity.Property(x => x.Status).HasMaxLength(20);
+            entity.Property(x => x.Version).IsConcurrencyToken();
             entity.HasIndex(x => new { x.TenantId, x.Code }).IsUnique();
             entity.HasOne<Uom>().WithMany().HasForeignKey(x => x.BaseUomId).OnDelete(DeleteBehavior.Restrict);
         });

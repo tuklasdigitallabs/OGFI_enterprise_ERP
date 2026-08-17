@@ -20,7 +20,7 @@ public sealed class CatalogReferenceService(
             from item in dbContext.CatalogItems.AsNoTracking()
             join baseUom in dbContext.Uoms.AsNoTracking() on item.BaseUomId equals baseUom.Id
             where item.TenantId == tenantId && item.Id == catalogItemId && item.Status == CatalogStatuses.Active
-            select new CatalogItemReference(item.Id, item.Code, item.Name, baseUom.Id, baseUom.Code))
+            select new CatalogItemReference(item.Id, item.Code, item.Name, baseUom.Id, baseUom.Code, item.Version))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
