@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Ogfi.Api.Endpoints;
 using Ogfi.Api.Security;
 using Ogfi.BuildingBlocks.Multitenancy;
@@ -50,6 +51,38 @@ builder.Services.AddDbContext<WorkflowDbContext>((sp, options) => options.UseNpg
 builder.Services.AddHealthChecks().AddDbContextCheck<FoundationDbContext>("foundation-db").AddDbContextCheck<CatalogDbContext>("catalog-db").AddDbContextCheck<InventoryDbContext>("inventory-db").AddDbContextCheck<ProcurementDbContext>("procurement-db").AddDbContextCheck<WorkflowDbContext>("workflow-db");
 var app = builder.Build();
 app.UseExceptionHandler();
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg
+        && (pg.SqlState == PostgresErrorCodes.SerializationFailure || pg.SqlState == PostgresErrorCodes.DeadlockDetected))
+    {
+        await Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "OGFI concurrency conflict",
+            detail: "The operation conflicted with another committed transaction. Retry using the current resource state.",
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = "CONCURRENCY.CONFLICT",
+                ["traceId"] = context.TraceIdentifier
+            }).ExecuteAsync(context);
+    }
+    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.SerializationFailure || ex.SqlState == PostgresErrorCodes.DeadlockDetected)
+    {
+        await Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "OGFI concurrency conflict",
+            detail: "The operation conflicted with another committed transaction. Retry using the current resource state.",
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = "CONCURRENCY.CONFLICT",
+                ["traceId"] = context.TraceIdentifier
+            }).ExecuteAsync(context);
+    }
+});
 app.Use(async (context, next) =>
 {
     const string header = "X-Correlation-Id";
