@@ -2,9 +2,20 @@ using Ogfi.BuildingBlocks.Messaging.Contracts;
 
 namespace Ogfi.Modules.DurableOperations;
 
+public interface IReplayLeaseRenewalRunner
+{
+    Task<ReplayDispatchResult> RunAsync(
+        Guid tenantId,
+        OperationAttempt attempt,
+        string workerCode,
+        Func<CancellationToken, Task<ReplayDispatchResult>> ownerAction,
+        CancellationToken cancellationToken);
+}
+
 public sealed class ReplayCoordinator(
     DurableOperationService operations,
-    IEnumerable<IReplayOwnerHandler> handlers)
+    IEnumerable<IReplayOwnerHandler> handlers,
+    IReplayLeaseRenewalRunner? leaseRenewalRunner = null)
 {
     private const int MaximumReplayAttempts = 3;
 
@@ -97,17 +108,26 @@ public sealed class ReplayCoordinator(
         ReplayDispatchResult result;
         try
         {
-            result = await handler.ReplayAsync(
-                new ReplayDispatchCommand(
+            var command = new ReplayDispatchCommand(
                     tenantId, operation.Id, operation.OperationType, operation.OwnerModule,
                     operation.OriginalSourceEventId, operation.OriginalCausationId,
-                    operation.CorrelationId, operation.LegalEntityId, operation.OutletId),
-                cancellationToken);
+                    operation.CorrelationId, operation.LegalEntityId, operation.OutletId);
+            result = leaseRenewalRunner is null
+                ? await handler.ReplayAsync(command, cancellationToken)
+                : await leaseRenewalRunner.RunAsync(
+                    tenantId, attempt, workerCode,
+                    token => handler.ReplayAsync(command, token), cancellationToken);
         }
         catch (OperationCanceledException)
         {
             // Host interruption is not a business cancellation. The RUNNING Attempt and
             // its lease remain recoverable and will be abandoned only after lease expiry.
+            throw;
+        }
+        catch (DurableOperationRuleException exception)
+            when (exception.Code == "OPERATIONS.ATTEMPT.LEASE_LOST")
+        {
+            // A stale owner must never acknowledge or complete an authoritative effect.
             throw;
         }
         catch (Exception)

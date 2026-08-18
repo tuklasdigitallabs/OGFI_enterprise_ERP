@@ -616,6 +616,18 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
             "OPERATIONS.HEARTBEAT.STALE", "An older heartbeat observation cannot replace newer state.");
     }
 
+    public async Task<long> GetNextHeartbeatObservationSequenceAsync(
+        Guid tenantId, string workerCode, CancellationToken cancellationToken = default)
+    {
+        ValidateTenant(tenantId);
+        var normalized = NormalizeCode(workerCode, 100, "worker code");
+        var current = await dbContext.WorkerHeartbeats.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.WorkerCode == normalized)
+            .Select(x => (long?)x.ObservationSequence)
+            .SingleOrDefaultAsync(cancellationToken);
+        return checked((current ?? 0) + 1);
+    }
+
     public async Task<ProcessingFailureProjection> RecordFailureAsync(
         ProcessingFailureUpdate update, CancellationToken cancellationToken = default)
     {
@@ -727,6 +739,46 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         failure.Replayable = false;
         failure.CurrentOperationId = null;
         failure.SafeErrorCode = Required(safeErrorCode, 120, "safe error code");
+        failure.SafeDetailJson = SafeDetailPolicy.Normalize(safeDetailJson);
+        failure.Version++;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return failure;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.VERSION_CONFLICT", "Processing failure was concurrently changed.");
+        }
+    }
+
+    public async Task<ProcessingFailureProjection?> RecoverFailureAfterNormalRetryAsync(
+        Guid tenantId,
+        string ownerModule,
+        string processorCode,
+        Guid originalSourceEventId,
+        string safeDetailJson = "{}",
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTenant(tenantId);
+        var owner = NormalizeCode(ownerModule, 60, "owner module");
+        var processor = NormalizeCode(processorCode, 100, "processor code");
+        dbContext.ChangeTracker.Clear();
+        var failure = await dbContext.ProcessingFailures.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.OwnerModule == owner
+                 && x.ProcessorCode == processor && x.OriginalSourceEventId == originalSourceEventId,
+            cancellationToken);
+        if (failure is null) return null;
+        if (failure.State == ProcessingFailureStates.Recovered) return failure;
+        if (!ProcessingFailureStates.IsReplayEligible(failure.State))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.STATE_TRANSITION_INVALID",
+                $"Failure state {failure.State} cannot transition to {ProcessingFailureStates.Recovered}.");
+        failure.State = ProcessingFailureStates.Recovered;
+        failure.Replayable = false;
+        failure.CurrentOperationId = null;
+        failure.SafeErrorCode = "OPERATIONS.NORMAL_RETRY.RECOVERED";
         failure.SafeDetailJson = SafeDetailPolicy.Normalize(safeDetailJson);
         failure.Version++;
         try
