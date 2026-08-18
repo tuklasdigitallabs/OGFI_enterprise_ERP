@@ -125,6 +125,8 @@ public sealed class FinanceSourcePosting
     public int ReplayCount { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? LastAttemptAtUtc { get; set; }
+    public DateTimeOffset? LastReplayAtUtc { get; set; }
+    public Guid? LastReplayByUserId { get; set; }
     public DateTimeOffset? PostedAtUtc { get; set; }
 }
 
