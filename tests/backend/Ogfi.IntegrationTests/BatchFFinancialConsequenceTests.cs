@@ -11,8 +11,13 @@ using Xunit;
 
 namespace Ogfi.IntegrationTests;
 
-public sealed class BatchFFinancialConsequenceTests(BatchFFixture fixture) : IClassFixture<BatchFFixture>
+[Collection(BatchFTestCollection.Name)]
+public sealed class BatchFFinancialConsequenceTests(BatchFFixture fixture)
 {
+    internal static async Task ConfigureValidFinanceForPhase3Async(
+        HttpClient client, FinanceBusinessContext context)
+        => _ = await ConfigureFinanceAsync(client, context);
+
     [Fact]
     public async Task Valid_goods_receipt_creates_one_balanced_traceable_journal_with_independent_fanout()
     {

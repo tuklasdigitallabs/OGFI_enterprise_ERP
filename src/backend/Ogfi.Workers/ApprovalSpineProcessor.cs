@@ -15,12 +15,27 @@ public sealed class ApprovalSpineProcessor(
     WorkflowApprovalService workflowApproval,
     PurchaseOrderApprovalOutcomeService procurementApproval,
     TimeProvider timeProvider,
-    ILogger<ApprovalSpineProcessor> logger)
+    ILogger<ApprovalSpineProcessor> logger,
+    ProcessorFailureRecorder? failureRecorder = null)
 {
-    public async Task ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
+    public async Task<ProcessorIterationResult> ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
     {
         await ProcessApprovalRequestsAsync(tenantId, cancellationToken);
         await ProcessApprovalOutcomesAsync(tenantId, cancellationToken);
+        var procurementPending = await procurementDb.OutboxMessages.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.ProcessedAtUtc == null
+                        && x.Type == "Procurement.PurchaseOrderApprovalRequested")
+            .OrderBy(x => x.OccurredAtUtc).Take(101).ToListAsync(cancellationToken);
+        var workflowPending = await workflowDb.OutboxMessages.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.ProcessedAtUtc == null
+                        && x.Type == "Workflow.PurchaseOrderApprovalCompleted")
+            .OrderBy(x => x.OccurredAtUtc).Take(101).ToListAsync(cancellationToken);
+        var all = procurementPending.Cast<Ogfi.BuildingBlocks.Messaging.OutboxMessage>()
+            .Concat(workflowPending).OrderBy(x => x.OccurredAtUtc).ToArray();
+        return new ProcessorIterationResult(
+            all.LastOrDefault()?.Id, all.Length,
+            all.Count(x => x.AttemptCount > 0 && x.LastError != null), 0,
+            all.FirstOrDefault()?.OccurredAtUtc, all.LastOrDefault(x => x.LastError != null)?.LastError);
     }
 
     private async Task ProcessApprovalRequestsAsync(Guid tenantId, CancellationToken cancellationToken)
@@ -36,6 +51,9 @@ public sealed class ApprovalSpineProcessor(
 
         foreach (var message in pending)
         {
+            var context = new ProcessorMessageContext(
+                tenantId, "WORKFLOW", ProcessorCodes.ApprovalRequest, message.Id,
+                message.CausationId, message.CorrelationId, "PURCHASE_ORDER_APPROVAL_REQUEST", message.Id);
             message.AttemptCount++;
             try
             {
@@ -72,11 +90,13 @@ public sealed class ApprovalSpineProcessor(
                 message.LastError = null;
                 message.ProcessedAtUtc = timeProvider.GetUtcNow();
                 await procurementDb.SaveChangesAsync(cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecoverAsync(context, cancellationToken);
             }
             catch (Exception ex) when (ex is WorkflowRuleException or JsonException or InvalidOperationException)
             {
                 message.LastError = ex is WorkflowRuleException workflowError ? workflowError.Code : ex.GetType().Name;
                 await procurementDb.SaveChangesAsync(cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Approval-start message {MessageId} for tenant {TenantId} remains pending", message.Id, tenantId);
             }
         }
@@ -95,6 +115,9 @@ public sealed class ApprovalSpineProcessor(
 
         foreach (var message in pending)
         {
+            var context = new ProcessorMessageContext(
+                tenantId, "PROCUREMENT", ProcessorCodes.ApprovalOutcome, message.Id,
+                message.CausationId, message.CorrelationId, "PURCHASE_ORDER_APPROVAL_OUTCOME", message.Id);
             message.AttemptCount++;
             try
             {
@@ -122,18 +145,21 @@ public sealed class ApprovalSpineProcessor(
                 message.LastError = null;
                 message.ProcessedAtUtc = timeProvider.GetUtcNow();
                 await workflowDb.SaveChangesAsync(cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecoverAsync(context, cancellationToken);
             }
             catch (ProcurementRuleException ex) when (ex.Code is "PROCUREMENT.PO.APPROVAL_STALE" or "PROCUREMENT.PO.APPROVAL_OUTCOME_INVALID" or "PROCUREMENT.PO.NOT_FOUND")
             {
                 message.LastError = ex.Code;
                 message.ProcessedAtUtc = timeProvider.GetUtcNow();
                 await workflowDb.SaveChangesAsync(cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Approval outcome {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or ProcurementRuleException)
             {
                 message.LastError = ex is ProcurementRuleException procurementError ? procurementError.Code : ex.GetType().Name;
                 await workflowDb.SaveChangesAsync(cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Approval outcome {MessageId} for tenant {TenantId} remains pending", message.Id, tenantId);
             }
         }

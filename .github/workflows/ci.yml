@@ -142,9 +142,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Generate controlled Reference Build Manifest
+        env:
+          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_REVISION: ${{ github.sha }}
         run: |
           SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$SOURCE_BRANCH" == batch-f/* ]]; then
+          if [[ "$SOURCE_BRANCH" == batch-g/* ]]; then
+            BUILD_BASELINE="RI01-BL07-CANDIDATE"
+            ARCHITECTURE_BASELINE="ERP OGFI Master Approved Baseline v5.0 / G9.8"
+            ACTIVE_BATCH="G"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260818100110_InventoryMovementTenantRls|Procurement:20260818120100_OutboxConsumerDeliveryRls|Workflow:20260818061100_WorkflowTenantRls|Finance:20260818130100_FinanceTenantRls|Audit:20260818150000_InitialAudit|DurableOperations:20260818160000_InitialDurableOperations"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement","Workflow","Finance","Audit","DurableOperations"]'
+          elif [[ "$SOURCE_BRANCH" == batch-f/* ]]; then
             BUILD_BASELINE="RI01-BL06-CANDIDATE"
             ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.8 / G9.7 Implementation Architecture"
             ACTIVE_BATCH="F"
@@ -186,7 +195,8 @@ jobs:
             "referenceImplementationId": "RI-01",
             "buildBaselineId": "${BUILD_BASELINE}",
             "architectureBaseline": "${ARCHITECTURE_BASELINE}",
-            "sourceRevision": "${GITHUB_SHA}",
+            "sourceRevision": "${SOURCE_REVISION}",
+            "checkoutRevision": "${CHECKOUT_REVISION}",
             "sourceBranch": "${SOURCE_BRANCH}",
             "githubRunId": "${GITHUB_RUN_ID}",
             "backendSdk": ".NET SDK 10.0.400",

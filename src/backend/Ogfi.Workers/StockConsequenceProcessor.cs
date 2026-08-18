@@ -27,14 +27,15 @@ public sealed class StockConsequenceProcessor(
     IStockConsequenceAttemptHook attemptHook,
     TimeProvider timeProvider,
     ILogger<StockConsequenceProcessor> logger,
-    OutboxDeliveryStore? deliveries = null)
+    OutboxDeliveryStore? deliveries = null,
+    ProcessorFailureRecorder? failureRecorder = null)
 {
-    public async Task ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
+    public async Task<ProcessorIterationResult> ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
     {
         if (deliveries is null)
         {
             await ProcessLegacySingleConsumerAsync(tenantId, cancellationToken);
-            return;
+            return ProcessorIterationResult.Empty;
         }
 
         var messages = await procurementDb.OutboxMessages.AsNoTracking()
@@ -47,6 +48,9 @@ public sealed class StockConsequenceProcessor(
 
         foreach (var message in messages)
         {
+            var context = new ProcessorMessageContext(
+                tenantId, "INVENTORY", ProcessorCodes.Inventory, message.Id,
+                message.CausationId, message.CorrelationId, "OUTBOX_MESSAGE", message.Id);
             var delivery = await deliveries.EnsureAsync(
                 tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
             if (delivery.Status is OutboxDeliveryStatuses.Completed or OutboxDeliveryStatuses.TerminalRejected)
@@ -60,30 +64,70 @@ public sealed class StockConsequenceProcessor(
             {
                 await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
                 var payload = DeserializeAndValidate(message.Id, tenantId, message.Payload);
+                context = context with
+                {
+                    ResourceType = "GOODS_RECEIPT",
+                    ResourceId = payload.GoodsReceiptId,
+                    LegalEntityId = payload.LegalEntityId,
+                    OutletId = payload.OutletId
+                };
                 await inventoryConsumer.ApplyAsync(payload, cancellationToken);
                 await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
                 await deliveries.MarkCompletedAsync(tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecoverAsync(context, cancellationToken);
             }
             catch (InventoryRuleException ex)
             {
                 await deliveries.MarkTerminalRejectedAsync(
                     tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, ex.Code, cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
             }
             catch (JsonException ex)
             {
                 await deliveries.MarkTerminalRejectedAsync(
                     tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, "INVENTORY.EVENT.INVALID_JSON", cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 await deliveries.MarkRetryAsync(
                     tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, ex.GetType().Name, cancellationToken);
+                if (failureRecorder is not null) await failureRecorder.RecordAsync(context, ex, cancellationToken);
                 logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} remains retryable for tenant {TenantId}", message.Id, tenantId);
             }
 
             await deliveries.TryFinalizeMessageAsync(tenantId, message.Id, cancellationToken);
+        }
+        var state = await deliveries.GetConsumerStateAsync(
+            tenantId, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
+        return state with { CurrentOrLastSourceId = messages.LastOrDefault()?.Id };
+    }
+
+    public async Task<ReplayDispatchResult> ReplaySourceAsync(
+        ReplayDispatchCommand command, CancellationToken cancellationToken)
+    {
+        var message = await procurementDb.OutboxMessages.AsNoTracking().SingleOrDefaultAsync(
+            x => x.TenantId == command.TenantId && x.Id == command.OriginalSourceEventId
+                 && x.Type == "Procurement.GoodsReceiptPosted" && x.SchemaVersion == 1,
+            cancellationToken);
+        if (message is null)
+            return new ReplayDispatchResult(false, SafeErrorCode: "INVENTORY.REPLAY.SOURCE_NOT_FOUND",
+                SafeDetailJson: "{\"reasonCode\":\"SOURCE_NOT_FOUND\"}");
+        try
+        {
+            var payload = DeserializeAndValidate(message.Id, command.TenantId, message.Payload);
+            await inventoryConsumer.ApplyAsync(payload, cancellationToken);
+            return new ReplayDispatchResult(true, "INVENTORY_SOURCE_EVENT", message.Id,
+                SafeDetailJson: "{\"status\":\"SUCCEEDED\"}");
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            var classified = ProcessorFailureClassifier.Classify(ex);
+            return new ReplayDispatchResult(false, SafeErrorCode: classified.SafeErrorCode,
+                SafeDetailJson: JsonSerializer.Serialize(new { reasonCode = classified.SafeErrorCode }),
+                Retryable: classified.Replayable);
         }
     }
 

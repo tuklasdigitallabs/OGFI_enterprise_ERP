@@ -6,20 +6,34 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Ogfi.BuildingBlocks.Messaging.Contracts;
 using Ogfi.BuildingBlocks.Multitenancy;
 using Ogfi.Modules.Catalog;
 using Ogfi.Modules.Catalog.Persistence;
+using Ogfi.Modules.Audit;
+using Ogfi.Modules.Audit.Persistence;
+using Ogfi.Modules.DurableOperations;
+using Ogfi.Modules.DurableOperations.Persistence;
 using Ogfi.Modules.Finance.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Inventory.Persistence;
 using Ogfi.Modules.Procurement.Persistence;
 using Ogfi.Modules.Workflow.Persistence;
+using Ogfi.Modules.Workflow;
+using Ogfi.Modules.Procurement;
+using Ogfi.BuildingBlocks.Messaging;
 using Ogfi.Workers;
 using Xunit;
 
 namespace Ogfi.IntegrationTests;
+
+[CollectionDefinition(Name)]
+public sealed class BatchFTestCollection : ICollectionFixture<BatchFFixture>
+{
+    public const string Name = "Batch F shared database fixture";
+}
 
 public sealed class BatchFFixture : WebApplicationFactory<Program>, IAsyncLifetime
 {
@@ -55,6 +69,19 @@ public sealed class BatchFFixture : WebApplicationFactory<Program>, IAsyncLifeti
             services.AddScoped<OutboxDeliveryStore>();
             services.AddScoped<StockConsequenceProcessor>();
             services.AddScoped<FinancialConsequenceProcessor>();
+            services.AddScoped<AuditMaterialActionProcessor>();
+            services.AddScoped<PurchaseOrderApprovalOutcomeService>();
+            services.AddScoped<ApprovalSpineProcessor>();
+            services.AddScoped<OperationalAuditEvidenceService>();
+            services.AddSingleton<ProcessorFailureRecorder>();
+            services.AddSingleton<WorkerHeartbeatReporter>();
+            services.AddSingleton<TenantWorkerRunner>();
+            services.AddScoped<InventoryReplayHandler>();
+            services.AddScoped<FinanceReplayHandler>();
+            services.AddScoped<ProcurementAuditReplayHandler>();
+            services.AddScoped<OperationalReplayService>();
+            services.AddSingleton(new ReplayWorkerOptions());
+            services.AddTransient<ReplayOperationWorker>();
             services.AddAuthentication(options =>
                 {
                     options.DefaultAuthenticateScheme = TestAuthenticationHandler.SchemeName;
@@ -74,6 +101,8 @@ public sealed class BatchFFixture : WebApplicationFactory<Program>, IAsyncLifeti
             await scope.ServiceProvider.GetRequiredService<ProcurementDbContext>().Database.MigrateAsync();
             await scope.ServiceProvider.GetRequiredService<WorkflowDbContext>().Database.MigrateAsync();
             await scope.ServiceProvider.GetRequiredService<FinanceDbContext>().Database.MigrateAsync();
+            await scope.ServiceProvider.GetRequiredService<AuditDbContext>().Database.MigrateAsync();
+            await scope.ServiceProvider.GetRequiredService<DurableOperationsDbContext>().Database.MigrateAsync();
         }
         await EnsureRlsTestRoleAsync();
         await SeedIdentityAsync();
@@ -223,6 +252,29 @@ public sealed class BatchFFixture : WebApplicationFactory<Program>, IAsyncLifeti
 
     public Task ProcessInventoryAsync(Guid tenantId) => ProcessAsync<StockConsequenceProcessor>(tenantId, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
     public Task ProcessFinanceAsync(Guid tenantId) => ProcessAsync<FinancialConsequenceProcessor>(tenantId, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public Task ProcessAuditAsync(Guid tenantId) => ProcessAsync<AuditMaterialActionProcessor>(tenantId, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public Task ProcessInventoryWithHeartbeatAsync(Guid tenantId)
+        => ProcessWithHeartbeatAsync<StockConsequenceProcessor>(
+            tenantId, WorkerCodes.Inventory, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public Task ProcessFinanceWithHeartbeatAsync(Guid tenantId)
+        => ProcessWithHeartbeatAsync<FinancialConsequenceProcessor>(
+            tenantId, WorkerCodes.Finance, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public Task ProcessAuditWithHeartbeatAsync(Guid tenantId)
+        => ProcessWithHeartbeatAsync<AuditMaterialActionProcessor>(
+            tenantId, WorkerCodes.Audit, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public Task ProcessApprovalWithHeartbeatAsync(Guid tenantId)
+        => ProcessWithHeartbeatAsync<ApprovalSpineProcessor>(
+            tenantId, WorkerCodes.Approval, (processor, token) => processor.ProcessTenantAsync(tenantId, token));
+    public async Task ProcessReplayWithHeartbeatAsync(Guid tenantId)
+    {
+        var runner = Services.GetRequiredService<TenantWorkerRunner>();
+        var logger = Services.GetRequiredService<ILoggerFactory>().CreateLogger("test.operations.replay");
+        await runner.RunTenantAsync(
+            WorkerCodes.Replay, tenantId,
+            (services, activeTenant, token) => services.GetRequiredService<ReplayOperationWorker>()
+                .ProcessTenantOnceAsync(services, activeTenant, token),
+            logger, CancellationToken.None);
+    }
 
     public async Task ProcessBothAsync(Guid tenantId)
     {
@@ -238,6 +290,167 @@ public sealed class BatchFFixture : WebApplicationFactory<Program>, IAsyncLifeti
 
     public Task<long> CountInventoryMovementsAsync(Guid eventId)
         => ScalarInt64Async(TenantA, "select count(*) from inventory.inventory_movements where \"SourceEventId\"=@id;", eventId);
+
+    public Task<long> CountAuditEventsAsync(Guid eventId)
+        => ScalarInt64Async(TenantA, "select count(*) from audit.audit_events where \"SourceEventId\"=@id;", eventId);
+
+    public async Task<string[]> GetAuditActionsAsync(Guid eventId)
+    {
+        await using var connection = await OpenTenantConnectionAsync(TenantA);
+        await using var command = new NpgsqlCommand(
+            "select \"Action\" from audit.audit_events where \"SourceEventId\"=@id order by \"Action\";", connection);
+        command.Parameters.AddWithValue("id", eventId);
+        await using var reader = await command.ExecuteReaderAsync();
+        var actions = new List<string>();
+        while (await reader.ReadAsync()) actions.Add(reader.GetString(0));
+        return actions.ToArray();
+    }
+
+    public async Task<WorkerHeartbeat> GetHeartbeatAsync(string workerCode)
+    {
+        await using var scope = Services.CreateAsyncScope();
+        scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>().SetCandidateTenant(TenantA);
+        return await scope.ServiceProvider.GetRequiredService<DurableOperationsDbContext>()
+            .WorkerHeartbeats.AsNoTracking().SingleAsync(
+                x => x.TenantId == TenantA && x.WorkerCode == workerCode.ToUpperInvariant());
+    }
+
+    public async Task<ProcessingFailureProjection> GetFailureAsync(Guid sourceEventId, string processorCode)
+    {
+        await using var scope = Services.CreateAsyncScope();
+        scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>().SetCandidateTenant(TenantA);
+        return await scope.ServiceProvider.GetRequiredService<DurableOperationsDbContext>()
+            .ProcessingFailures.AsNoTracking().SingleAsync(
+                x => x.TenantId == TenantA && x.OriginalSourceEventId == sourceEventId
+                     && x.ProcessorCode == processorCode.ToUpperInvariant());
+    }
+
+    public async Task<ReplayDispatchResult> ReplayWithAsync<THandler>(ReplayDispatchCommand command)
+        where THandler : IReplayOwnerHandler
+    {
+        await using var scope = Services.CreateAsyncScope();
+        scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>()
+            .SetCandidateTenant(command.TenantId);
+        return await scope.ServiceProvider.GetRequiredService<THandler>()
+            .ReplayAsync(command, CancellationToken.None);
+    }
+
+    public async Task<string> RebuildTraceAsync(Guid purchaseOrderId)
+    {
+        await using var scope = Services.CreateAsyncScope();
+        scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>().SetCandidateTenant(TenantA);
+        var trace = Assert.Single(await scope.ServiceProvider.GetRequiredService<Rs01TraceProjectionService>()
+            .RebuildAsync(TenantA, purchaseOrderId));
+        return trace.State;
+    }
+
+    public async Task<(Guid SubmissionEventId, Guid ApprovalEventId)> SeedCommittedApprovalEvidenceAsync(
+        SeededFinanceEvent receiptEvent)
+    {
+        var submissionEventId = Guid.NewGuid();
+        var approvalEventId = Guid.NewGuid();
+        var definitionId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var decisionId = Guid.NewGuid();
+        var now = receiptEvent.Payload.OccurredAtUtc.AddMinutes(-2);
+
+        await using var scope = Services.CreateAsyncScope();
+        scope.ServiceProvider.GetRequiredService<ITenantExecutionContextAccessor>().SetCandidateTenant(TenantA);
+        var procurement = scope.ServiceProvider.GetRequiredService<ProcurementDbContext>();
+        procurement.Suppliers.Add(new Supplier
+        {
+            Id = receiptEvent.SupplierId, TenantId = TenantA, Code = "SUP-P3",
+            Name = "Phase 3 Supplier", Status = ProcurementStatuses.Active
+        });
+        procurement.PurchaseOrders.Add(new PurchaseOrder
+        {
+            Id = receiptEvent.PurchaseOrderId, TenantId = TenantA,
+            Number = receiptEvent.Payload.PurchaseOrderNumber,
+            SupplierId = receiptEvent.SupplierId, SupplierCodeSnapshot = "SUP-P3",
+            SupplierNameSnapshot = "Phase 3 Supplier",
+            LegalEntityId = receiptEvent.Payload.LegalEntityId,
+            OutletId = receiptEvent.Payload.OutletId, Currency = receiptEvent.Payload.Currency,
+            Status = ProcurementStatuses.Approved, BusinessDate = receiptEvent.Payload.BusinessDate,
+            TotalNetAmount = receiptEvent.LineNetAmount, Version = 3,
+            CreatedByUserId = UserAlice, CreatedAtUtc = now.AddMinutes(-1),
+            SubmittedByUserId = UserAlice, SubmittedAtUtc = now
+        });
+        var request = new PurchaseOrderApprovalRequestedV1(
+            submissionEventId, TenantA, receiptEvent.PurchaseOrderId, 1, 2, UserAlice,
+            receiptEvent.Payload.LegalEntityId, receiptEvent.Payload.OutletId,
+            receiptEvent.Payload.BusinessDate,
+            new PurchaseOrderApprovalContext(receiptEvent.LineNetAmount,
+                receiptEvent.Payload.Currency, receiptEvent.Payload.OutletId, UserAlice),
+            receiptEvent.Payload.CorrelationId, now);
+        procurement.OutboxMessages.Add(new OutboxMessage
+        {
+            Id = submissionEventId, TenantId = TenantA,
+            Type = "Procurement.PurchaseOrderApprovalRequested", SchemaVersion = 1,
+            OccurredAtUtc = now, CorrelationId = receiptEvent.Payload.CorrelationId,
+            CausationId = $"PO:{receiptEvent.PurchaseOrderId}:APPROVAL:1",
+            Payload = JsonSerializer.Serialize(request), ProcessedAtUtc = now, AttemptCount = 1
+        });
+        await procurement.SaveChangesAsync();
+
+        var workflow = scope.ServiceProvider.GetRequiredService<WorkflowDbContext>();
+        workflow.WorkflowDefinitionVersions.Add(new WorkflowDefinitionVersion
+        {
+            Id = definitionId, TenantId = TenantA, Code = WorkflowDefinitionCodes.PurchaseOrderApproval,
+            Version = 1, Name = "Phase 3 approval", CreatedAtUtc = now
+        });
+        workflow.WorkflowInstances.Add(new WorkflowInstance
+        {
+            Id = instanceId, TenantId = TenantA, DefinitionVersionId = definitionId,
+            SubjectType = WorkflowSubjectTypes.PurchaseOrder, SubjectId = receiptEvent.PurchaseOrderId,
+            ApprovalRound = 1, SubjectVersion = 2, RequesterUserId = UserAlice,
+            LegalEntityId = receiptEvent.Payload.LegalEntityId, OutletId = receiptEvent.Payload.OutletId,
+            BusinessDate = receiptEvent.Payload.BusinessDate, PurchaseOrderTotal = receiptEvent.LineNetAmount,
+            Currency = receiptEvent.Payload.Currency, Status = WorkflowStatuses.Approved,
+            CorrelationId = receiptEvent.Payload.CorrelationId, StartedAtUtc = now,
+            CompletedAtUtc = now.AddMinutes(1)
+        });
+        workflow.WorkflowTasks.Add(new WorkflowTask
+        {
+            Id = taskId, TenantId = TenantA, InstanceId = instanceId,
+            StepKey = WorkflowTaskKeys.PurchaseOrderApproval, Status = WorkflowStatuses.Approved,
+            CreatedAtUtc = now, CompletedAtUtc = now.AddMinutes(1)
+        });
+        workflow.ApprovalDecisions.Add(new ApprovalDecision
+        {
+            Id = decisionId, TenantId = TenantA, InstanceId = instanceId, TaskId = taskId,
+            Decision = WorkflowStatuses.Approved, ActorUserId = UserAlice,
+            DecidedAtUtc = now.AddMinutes(1)
+        });
+        var completed = new PurchaseOrderApprovalCompletedV1(
+            approvalEventId, TenantA, instanceId, taskId, receiptEvent.PurchaseOrderId,
+            1, 2, WorkflowStatuses.Approved, UserAlice, now.AddMinutes(1),
+            receiptEvent.Payload.CorrelationId, now.AddMinutes(1));
+        workflow.OutboxMessages.Add(new OutboxMessage
+        {
+            Id = approvalEventId, TenantId = TenantA,
+            Type = "Workflow.PurchaseOrderApprovalCompleted", SchemaVersion = 1,
+            OccurredAtUtc = now.AddMinutes(1), CorrelationId = receiptEvent.Payload.CorrelationId,
+            CausationId = $"WF:{instanceId}:TASK:{taskId}:APPROVED",
+            Payload = JsonSerializer.Serialize(completed), ProcessedAtUtc = now.AddMinutes(1), AttemptCount = 1
+        });
+        await workflow.SaveChangesAsync();
+        return (submissionEventId, approvalEventId);
+    }
+
+    private async Task ProcessWithHeartbeatAsync<TProcessor>(
+        Guid tenantId,
+        string workerCode,
+        Func<TProcessor, CancellationToken, Task<ProcessorIterationResult>> action)
+        where TProcessor : notnull
+    {
+        var runner = Services.GetRequiredService<TenantWorkerRunner>();
+        var logger = Services.GetRequiredService<ILoggerFactory>().CreateLogger($"test.{workerCode}");
+        await runner.RunTenantAsync(
+            workerCode, tenantId,
+            (services, _, token) => action(services.GetRequiredService<TProcessor>(), token),
+            logger, CancellationToken.None);
+    }
 
     public async Task<FinanceSourcePostingEvidence> GetSourcePostingAsync(Guid eventId)
     {

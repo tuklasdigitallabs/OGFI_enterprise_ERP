@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Ogfi.Modules.Catalog.Persistence;
 using Ogfi.Modules.Finance.Persistence;
+using Ogfi.Modules.Audit.Persistence;
+using Ogfi.Modules.DurableOperations.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Inventory.Persistence;
 using Ogfi.Modules.Procurement.Persistence;
@@ -15,7 +17,9 @@ await MigrateAsync(new InventoryDbContext(new DbContextOptionsBuilder<InventoryD
 await MigrateAsync(new ProcurementDbContext(new DbContextOptionsBuilder<ProcurementDbContext>().UseNpgsql(connectionString).Options));
 await MigrateAsync(new WorkflowDbContext(new DbContextOptionsBuilder<WorkflowDbContext>().UseNpgsql(connectionString).Options));
 await MigrateAsync(new FinanceDbContext(new DbContextOptionsBuilder<FinanceDbContext>().UseNpgsql(connectionString).Options));
-Console.WriteLine("OGFI migrations complete for Foundation, Catalog, Inventory, Procurement, Workflow and Finance.");
+await MigrateAsync(new AuditDbContext(new DbContextOptionsBuilder<AuditDbContext>().UseNpgsql(connectionString).Options));
+await MigrateAsync(new DurableOperationsDbContext(new DbContextOptionsBuilder<DurableOperationsDbContext>().UseNpgsql(connectionString).Options));
+Console.WriteLine("OGFI migrations complete for Foundation, Catalog, Inventory, Procurement, Workflow, Finance, Audit and Durable Operations.");
 
 static async Task MigrateAsync(DbContext dbContext)
 {
