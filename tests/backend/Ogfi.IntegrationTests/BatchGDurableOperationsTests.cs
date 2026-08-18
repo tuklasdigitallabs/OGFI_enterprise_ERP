@@ -85,7 +85,7 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
     }
 
     [Fact]
-    public async Task Replay_request_key_is_idempotent_concurrently_and_source_event_allows_later_requests()
+    public async Task Replay_request_is_idempotent_and_different_keys_are_exclusive_and_atomic()
     {
         var update = fixture.CreateFailure(Guid.NewGuid());
         Guid failureId;
@@ -96,25 +96,44 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         await using var secondDb = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
         var firstCoordinator = new ReplayCoordinator(fixture.CreateService(firstDb), []);
         var secondCoordinator = new ReplayCoordinator(fixture.CreateService(secondDb), []);
-        var sameKey = $"same-{failureId:N}";
-        var operations = await Task.WhenAll(
-            firstCoordinator.RequestReplayForFailureAsync(update.TenantId, failureId, sameKey, null, null),
-            secondCoordinator.RequestReplayForFailureAsync(update.TenantId, failureId, sameKey, null, null));
-        Assert.Equal(operations[0].Id, operations[1].Id);
+        var firstKey = $"first-{failureId:N}";
+        var secondKey = $"second-{failureId:N}";
+        var outcomes = await Task.WhenAll(
+            CaptureOperationAsync(firstCoordinator.RequestReplayForFailureAsync(
+                update.TenantId, failureId, firstKey, null, null)),
+            CaptureOperationAsync(secondCoordinator.RequestReplayForFailureAsync(
+                update.TenantId, failureId, secondKey, null, null)));
+        var retained = Assert.Single(outcomes, x => x.Operation is not null).Operation!;
+        Assert.Single(outcomes, x => x.Error?.Code == "OPERATIONS.REPLAY.ACTIVE_EXISTS");
 
         await using var verification = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
-        Assert.Equal(1, await verification.Operations.CountAsync(x => x.ReplayRequestKey == sameKey));
-        var coordinator = new ReplayCoordinator(fixture.CreateService(verification), []);
-        var conflict = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
-            coordinator.RequestReplayForFailureAsync(
-                update.TenantId, failureId, sameKey, Guid.NewGuid(), null));
-        Assert.Equal("OPERATIONS.REPLAY.IDENTITY_CONFLICT", conflict.Code);
-        var later = await coordinator.RequestReplayForFailureAsync(
-            update.TenantId, failureId, $"later-{failureId:N}", null, null);
-        Assert.NotEqual(operations[0].Id, later.Id);
-        Assert.Equal(operations[0].OriginalSourceEventId, later.OriginalSourceEventId);
-        Assert.Equal(2, await verification.Operations.CountAsync(
+        Assert.Equal(1, await verification.Operations.CountAsync(
             x => x.OriginalSourceEventId == update.OriginalSourceEventId));
+        var linked = await verification.ProcessingFailures.SingleAsync(x => x.Id == failureId);
+        Assert.Equal(retained.Id, linked.CurrentOperationId);
+        var coordinator = new ReplayCoordinator(fixture.CreateService(verification), []);
+        var same = await coordinator.RequestReplayForFailureAsync(
+            update.TenantId, failureId, retained.ReplayRequestKey, null, null);
+        Assert.Equal(retained.Id, same.Id);
+        await using var sameKeyDbA = fixture.CreateContext(update.TenantId);
+        await using var sameKeyDbB = fixture.CreateContext(update.TenantId);
+        var sameKeyResults = await Task.WhenAll(
+            new ReplayCoordinator(fixture.CreateService(sameKeyDbA), []).RequestReplayForFailureAsync(
+                update.TenantId, failureId, retained.ReplayRequestKey, null, null),
+            new ReplayCoordinator(fixture.CreateService(sameKeyDbB), []).RequestReplayForFailureAsync(
+                update.TenantId, failureId, retained.ReplayRequestKey, null, null));
+        Assert.All(sameKeyResults, x => Assert.Equal(retained.Id, x.Id));
+        var active = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            coordinator.RequestReplayForFailureAsync(
+                update.TenantId, failureId, $"third-{failureId:N}", null, null));
+        Assert.Equal("OPERATIONS.REPLAY.ACTIVE_EXISTS", active.Code);
+
+        retained = await fixture.CreateService(verification).TransitionAsync(
+            retained.TenantId, retained.Id, retained.Version, OperationStatuses.Running);
+        active = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            coordinator.RequestReplayForFailureAsync(
+                update.TenantId, failureId, $"running-{failureId:N}", null, null));
+        Assert.Equal("OPERATIONS.REPLAY.ACTIVE_EXISTS", active.Code);
     }
 
     [Fact]
@@ -153,25 +172,12 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
             }));
         Assert.Equal("OPERATIONS.FAILURE.STATE_TRANSITION_INVALID", terminalRegression.Code);
 
-        var recoveredUpdate = fixture.CreateFailure(Guid.NewGuid()) with { State = ProcessingFailureStates.Recovered };
-        var recovered = await service.RecordFailureAsync(recoveredUpdate);
-        var recoveredRegression = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
-            service.RecordFailureAsync(recoveredUpdate with
+        var recoveryOccurrence = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()) with
             {
-                FailureId = recovered.Id, State = ProcessingFailureStates.BusinessFailed
+                State = ProcessingFailureStates.Recovered
             }));
-        Assert.Equal("OPERATIONS.FAILURE.STATE_TRANSITION_INVALID", recoveredRegression.Code);
-        var completed = await service.RecordFailureAsync(recoveredUpdate with
-        {
-            FailureId = recovered.Id, State = ProcessingFailureStates.Completed
-        });
-        Assert.False(completed.Replayable);
-        var completedRegression = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
-            service.RecordFailureAsync(recoveredUpdate with
-            {
-                FailureId = recovered.Id, State = ProcessingFailureStates.Recovered
-            }));
-        Assert.Equal("OPERATIONS.FAILURE.STATE_TRANSITION_INVALID", completedRegression.Code);
+        Assert.Equal("OPERATIONS.FAILURE.OCCURRENCE_STATE_INVALID", recoveryOccurrence.Code);
     }
 
     [Fact]
@@ -239,36 +245,50 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
     }
 
     [Fact]
-    public async Task Heartbeat_replica_races_preserve_newest_observation_and_reject_stale_updates()
+    public async Task Heartbeat_observations_are_idempotent_monotonic_and_replica_safe()
     {
         var baseline = fixture.TimeProvider.GetUtcNow();
         var worker = $"replica-{Guid.NewGuid():N}";
-        var older = fixture.CreateHeartbeat(worker, baseline.AddMinutes(1), pendingCount: 5);
-        var newer = fixture.CreateHeartbeat(worker, baseline.AddMinutes(2), pendingCount: 1);
-        await using var firstDb = fixture.CreateContext(older.TenantId);
-        await using var secondDb = fixture.CreateContext(older.TenantId);
-        var outcomes = await Task.WhenAll(
-            CaptureHeartbeatAsync(fixture.CreateService(firstDb).UpsertHeartbeatAsync(older)),
-            CaptureHeartbeatAsync(fixture.CreateService(secondDb).UpsertHeartbeatAsync(newer)));
-        Assert.Contains(outcomes, x => x.Heartbeat?.LastIterationStartedAtUtc == newer.LastIterationStartedAtUtc);
-
-        await using var verification = fixture.CreateContext(older.TenantId);
-        var persisted = await verification.WorkerHeartbeats.SingleAsync(x => x.WorkerCode == worker.ToUpperInvariant());
-        Assert.Equal(newer.LastIterationStartedAtUtc, persisted.LastIterationStartedAtUtc);
+        var started = fixture.CreateHeartbeat(worker, baseline.AddMinutes(1), pendingCount: 5, sequence: 1);
+        await using var verification = fixture.CreateContext(started.TenantId);
+        var service = fixture.CreateService(verification);
+        await service.UpsertHeartbeatAsync(started);
+        var succeeded = started with
+        {
+            ObservationId = Guid.NewGuid(), ObservationSequence = 2,
+            LastSucceededAtUtc = started.LastIterationStartedAtUtc, PendingCount = 1
+        };
+        var persisted = await service.UpsertHeartbeatAsync(succeeded);
+        Assert.Equal(2, persisted.ObservationSequence);
         Assert.Equal(1, persisted.PendingCount);
+        var duplicate = await service.UpsertHeartbeatAsync(succeeded);
+        Assert.Equal(persisted.Id, duplicate.Id);
+        var conflict = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            service.UpsertHeartbeatAsync(succeeded with { PendingCount = 2 }));
+        Assert.Equal("OPERATIONS.HEARTBEAT.OBSERVATION_CONFLICT", conflict.Code);
+        conflict = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            service.UpsertHeartbeatAsync(succeeded with
+            {
+                ObservationSequence = 3, PendingCount = 0
+            }));
+        Assert.Equal("OPERATIONS.HEARTBEAT.OBSERVATION_CONFLICT", conflict.Code);
         var stale = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
-            fixture.CreateService(verification).UpsertHeartbeatAsync(older));
+            service.UpsertHeartbeatAsync(started with { ObservationId = Guid.NewGuid() }));
         Assert.Equal("OPERATIONS.HEARTBEAT.STALE", stale.Code);
 
-        var firstInsertWorker = $"first-{Guid.NewGuid():N}";
-        var sameObservation = fixture.CreateHeartbeat(firstInsertWorker, baseline.AddMinutes(3), 3);
-        await using var replicaA = fixture.CreateContext(sameObservation.TenantId);
-        await using var replicaB = fixture.CreateContext(sameObservation.TenantId);
-        var firstInsertOutcomes = await Task.WhenAll(
-            CaptureHeartbeatAsync(fixture.CreateService(replicaA).UpsertHeartbeatAsync(sameObservation)),
-            CaptureHeartbeatAsync(fixture.CreateService(replicaB).UpsertHeartbeatAsync(sameObservation)));
-        Assert.Single(firstInsertOutcomes, x => x.Heartbeat is not null);
-        Assert.Single(firstInsertOutcomes, x => x.Error?.Code == "OPERATIONS.HEARTBEAT.STALE");
+        var replicaWorker = $"replica-{Guid.NewGuid():N}";
+        var older = fixture.CreateHeartbeat(replicaWorker, baseline.AddMinutes(2), 5, sequence: 1);
+        var newer = fixture.CreateHeartbeat(replicaWorker, baseline.AddMinutes(3), 1, sequence: 1);
+        await using var replicaA = fixture.CreateContext(older.TenantId);
+        await using var replicaB = fixture.CreateContext(older.TenantId);
+        await Task.WhenAll(
+            CaptureHeartbeatAsync(fixture.CreateService(replicaA).UpsertHeartbeatAsync(older)),
+            CaptureHeartbeatAsync(fixture.CreateService(replicaB).UpsertHeartbeatAsync(newer)));
+        verification.ChangeTracker.Clear();
+        persisted = await verification.WorkerHeartbeats.SingleAsync(
+            x => x.WorkerCode == replicaWorker.ToUpperInvariant());
+        Assert.Equal(newer.LastIterationStartedAtUtc, persisted.LastIterationStartedAtUtc);
+        Assert.Equal(newer.ObservationId, persisted.ObservationId);
     }
 
     [Fact]
@@ -289,12 +309,16 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         var active = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
             service.StartAttemptAsync(operation.TenantId, operation.Id, "worker-b"));
         Assert.Equal("OPERATIONS.ATTEMPT.ACTIVE_EXISTS", active.Code);
+        attempt = await service.RenewAttemptLeaseAsync(
+            operation.TenantId, attempt.Id, attempt.LeaseToken, "worker-a");
+        Assert.Equal(2, attempt.Version);
         await service.AddCheckpointAsync(operation.TenantId, operation.Id, 1, "LOADED", 25,
             """{"progress":25}""");
         var regression = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
             service.AddCheckpointAsync(operation.TenantId, operation.Id, 2, "REGRESSION", 24));
         Assert.Equal("OPERATIONS.CHECKPOINT.PROGRESS_REGRESSION", regression.Code);
-        await service.CompleteAttemptAsync(operation.TenantId, attempt.Id, succeeded: true);
+        await service.CompleteAttemptAsync(
+            operation.TenantId, attempt.Id, attempt.LeaseToken, succeeded: true);
         operation = await service.TransitionAsync(operation.TenantId, operation.Id, operation.Version, OperationStatuses.Succeeded);
         var terminalAttempt = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
             service.StartAttemptAsync(operation.TenantId, operation.Id, "worker"));
@@ -331,8 +355,10 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         await using var firstCompletion = fixture.CreateContext(tenantId, completionBarrier);
         await using var secondCompletion = fixture.CreateContext(tenantId, completionBarrier);
         var completions = await Task.WhenAll(
-            CaptureAttemptAsync(fixture.CreateService(firstCompletion).CompleteAttemptAsync(tenantId, attempt.Id, true)),
-            CaptureAttemptAsync(fixture.CreateService(secondCompletion).CompleteAttemptAsync(tenantId, attempt.Id, true)));
+            CaptureAttemptAsync(fixture.CreateService(firstCompletion).CompleteAttemptAsync(
+                tenantId, attempt.Id, attempt.LeaseToken, true)),
+            CaptureAttemptAsync(fixture.CreateService(secondCompletion).CompleteAttemptAsync(
+                tenantId, attempt.Id, attempt.LeaseToken, true)));
         Assert.Single(completions, x => x.Attempt is not null);
         Assert.Single(completions, x => x.Error?.Code == "OPERATIONS.ATTEMPT.VERSION_CONFLICT");
     }
@@ -372,11 +398,14 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
     }
 
     [Fact]
-    public async Task Later_request_after_failed_operation_and_idempotent_owner_effect_are_supported()
+    public async Task Later_request_is_allowed_after_failure_but_success_recovers_and_blocks_replay()
     {
         await using var db = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
         var service = fixture.CreateService(db);
         var failure = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+        var attemptCount = failure.AttemptCount;
+        var firstFailedAt = failure.FirstFailedAtUtc;
+        var lastFailedAt = failure.LastFailedAtUtc;
         var failing = new ControlledReplayHandler((_, _) =>
             new ReplayDispatchResult(false, SafeErrorCode: "BUSINESS_REJECTED", Retryable: false));
         var firstCoordinator = new ReplayCoordinator(service, [failing]);
@@ -390,14 +419,38 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         var second = await secondCoordinator.RequestReplayForFailureAsync(
             failure.TenantId, failure.Id, $"authorized-after-failure-{failure.Id:N}", null, null);
         second = await secondCoordinator.ExecuteQueuedReplayOperationAsync(second.TenantId, second.Id, "worker-b");
-        var third = await secondCoordinator.RequestReplayForFailureAsync(
-            failure.TenantId, failure.Id, $"another-authorized-{failure.Id:N}", null, null);
-        third = await secondCoordinator.ExecuteQueuedReplayOperationAsync(third.TenantId, third.Id, "worker-c");
         Assert.Equal(OperationStatuses.Succeeded, second.Status);
-        Assert.Equal(OperationStatuses.Succeeded, third.Status);
         Assert.Equal(first.OriginalSourceEventId, second.OriginalSourceEventId);
-        Assert.Equal(second.OriginalSourceEventId, third.OriginalSourceEventId);
         Assert.Equal(1, idempotent.AuthoritativeEffectCount);
+        var recovered = await service.GetFailureAsync(failure.TenantId, failure.Id);
+        Assert.Equal(ProcessingFailureStates.Recovered, recovered.State);
+        Assert.False(recovered.Replayable);
+        Assert.Null(recovered.CurrentOperationId);
+        Assert.Equal(second.Id, recovered.RecoveryOperationId);
+        Assert.Equal(attemptCount, recovered.AttemptCount);
+        Assert.Equal(firstFailedAt, recovered.FirstFailedAtUtc);
+        Assert.Equal(lastFailedAt, recovered.LastFailedAtUtc);
+        var rejected = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            secondCoordinator.RequestReplayForFailureAsync(
+                failure.TenantId, failure.Id, $"after-recovery-{failure.Id:N}", null, null));
+        Assert.Equal("OPERATIONS.REPLAY.NOT_ALLOWED", rejected.Code);
+
+        var completed = await service.TransitionFailureStateAsync(
+            recovered.TenantId, recovered.Id, recovered.Version,
+            ProcessingFailureStates.Completed, recovered.RecoveryOperationId,
+            "OPERATIONS.REPLAY.COMPLETED", """{"status":"COMPLETED"}""");
+        Assert.Equal(attemptCount, completed.AttemptCount);
+        Assert.Equal(firstFailedAt, completed.FirstFailedAtUtc);
+        Assert.Equal(lastFailedAt, completed.LastFailedAtUtc);
+        Assert.False(completed.Replayable);
+        Assert.Null(completed.CurrentOperationId);
+        rejected = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            secondCoordinator.RequestReplayForFailureAsync(
+                failure.TenantId, failure.Id, $"after-completion-{failure.Id:N}", null, null));
+        Assert.Equal("OPERATIONS.REPLAY.NOT_ALLOWED", rejected.Code);
+        var terminalCancellation = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            secondCoordinator.RequestCancellationAsync(second.TenantId, second.Id));
+        Assert.Equal("OPERATIONS.CANCELLATION.NOT_ALLOWED", terminalCancellation.Code);
     }
 
     [Fact]
@@ -424,7 +477,7 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
     }
 
     [Fact]
-    public async Task Terminal_failure_cannot_request_replay_and_cancellation_is_persisted()
+    public async Task Terminal_and_recovered_failures_reject_replay_and_cancellation_is_explicit()
     {
         await using var db = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
         var service = fixture.CreateService(db);
@@ -440,17 +493,194 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         Assert.Equal("OPERATIONS.REPLAY.NOT_ALLOWED", rejected.Code);
 
         var replayable = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
-        var cancelling = new CancellingReplayHandler();
-        coordinator = new ReplayCoordinator(service, [cancelling]);
+        coordinator = new ReplayCoordinator(service, []);
         var operation = await coordinator.RequestReplayForFailureAsync(
             replayable.TenantId, replayable.Id, $"cancelled-{replayable.Id:N}", null, null);
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            coordinator.ExecuteQueuedReplayOperationAsync(operation.TenantId, operation.Id, "worker"));
-        operation = await service.GetOperationAsync(operation.TenantId, operation.Id);
+        operation = await coordinator.RequestCancellationAsync(operation.TenantId, operation.Id);
+        Assert.Equal(OperationStatuses.CancelRequested, operation.Status);
+        operation = await coordinator.ExecuteQueuedReplayOperationAsync(
+            operation.TenantId, operation.Id, "worker");
         Assert.Equal(OperationStatuses.Cancelled, operation.Status);
-        var attempt = Assert.Single(await db.OperationAttempts.Where(x => x.OperationId == operation.Id).ToListAsync());
-        Assert.Equal(OperationAttemptStatuses.Failed, attempt.Status);
-        Assert.Equal("OPERATIONS.REPLAY.CANCELLED", attempt.SafeErrorCode);
+        var afterCancellation = await coordinator.RequestReplayForFailureAsync(
+            replayable.TenantId, replayable.Id, $"after-cancel-{replayable.Id:N}", null, null);
+        Assert.Equal(OperationStatuses.Queued, afterCancellation.Status);
+
+        var interruptedFailure = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+        var cancelling = new CancellingReplayHandler();
+        coordinator = new ReplayCoordinator(service, [cancelling]);
+        var interrupted = await coordinator.RequestReplayForFailureAsync(
+            interruptedFailure.TenantId, interruptedFailure.Id,
+            $"interrupted-{interruptedFailure.Id:N}", null, null);
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            coordinator.ExecuteQueuedReplayOperationAsync(interrupted.TenantId, interrupted.Id, "worker"));
+        interrupted = await service.GetOperationAsync(interrupted.TenantId, interrupted.Id);
+        Assert.Equal(OperationStatuses.Running, interrupted.Status);
+        var attempt = Assert.Single(await db.OperationAttempts
+            .Where(x => x.OperationId == interrupted.Id).ToListAsync());
+        Assert.Equal(OperationAttemptStatuses.Running, attempt.Status);
+        Assert.Null(attempt.SafeErrorCode);
+    }
+
+    [Fact]
+    public async Task Expired_attempt_lease_recovers_crashes_without_rewriting_history()
+    {
+        var startedAt = fixture.TimeProvider.GetUtcNow();
+        await using var db = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
+        var service = fixture.CreateService(db);
+
+        var beforeAttemptFailure = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+        var successHandler = new ControlledReplayHandler((_, _) =>
+            new ReplayDispatchResult(true, "RESULT", Guid.NewGuid(), SafeDetailJson: """{"result":"RECOVERED"}"""));
+        var coordinator = new ReplayCoordinator(service, [successHandler]);
+        var beforeAttempt = await coordinator.RequestReplayForFailureAsync(
+            beforeAttemptFailure.TenantId, beforeAttemptFailure.Id,
+            $"before-attempt-{beforeAttemptFailure.Id:N}", null, null);
+        beforeAttempt = await service.TransitionAsync(
+            beforeAttempt.TenantId, beforeAttempt.Id, beforeAttempt.Version, OperationStatuses.Running);
+        beforeAttempt = await coordinator.ExecuteQueuedReplayOperationAsync(
+            beforeAttempt.TenantId, beforeAttempt.Id, "recovery-worker");
+        Assert.Equal(OperationStatuses.Succeeded, beforeAttempt.Status);
+        Assert.Single(await db.OperationAttempts.Where(x => x.OperationId == beforeAttempt.Id).ToListAsync());
+
+        var leaseFailure = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+        var leased = await coordinator.RequestReplayForFailureAsync(
+            leaseFailure.TenantId, leaseFailure.Id, $"lease-{leaseFailure.Id:N}", null, null);
+        leased = await service.TransitionAsync(
+            leased.TenantId, leased.Id, leased.Version, OperationStatuses.Running);
+        var staleAttempt = await service.StartAttemptAsync(leased.TenantId, leased.Id, "crashed-worker");
+        var active = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            service.StartAttemptAsync(leased.TenantId, leased.Id, "early-recovery"));
+        Assert.Equal("OPERATIONS.ATTEMPT.ACTIVE_EXISTS", active.Code);
+
+        var future = new FixedTimeProvider(startedAt.Add(DurableOperationService.DefaultAttemptLease).AddSeconds(1));
+        await using var futureDb = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
+        var futureService = fixture.CreateService(futureDb, future);
+        var leaseLost = await Assert.ThrowsAsync<DurableOperationRuleException>(() =>
+            futureService.CompleteAttemptAsync(
+                leased.TenantId, staleAttempt.Id, staleAttempt.LeaseToken, succeeded: true));
+        Assert.Equal("OPERATIONS.ATTEMPT.LEASE_LOST", leaseLost.Code);
+        var recoveryHandler = new ControlledReplayHandler((_, _) =>
+            new ReplayDispatchResult(true, "RESULT", Guid.NewGuid(), SafeDetailJson: """{"result":"RECOVERED"}"""));
+        var recoveredOperation = await new ReplayCoordinator(futureService, [recoveryHandler])
+            .ExecuteQueuedReplayOperationAsync(leased.TenantId, leased.Id, "late-recovery");
+        Assert.Equal(OperationStatuses.Succeeded, recoveredOperation.Status);
+        var attempts = await futureDb.OperationAttempts.Where(x => x.OperationId == leased.Id)
+            .OrderBy(x => x.AttemptNumber).ToListAsync();
+        Assert.Equal(new[] { OperationAttemptStatuses.Abandoned, OperationAttemptStatuses.Succeeded },
+            attempts.Select(x => x.Status));
+        Assert.Equal("OPERATIONS.ATTEMPT.STALE_LEASE", attempts[0].SafeErrorCode);
+        Assert.Equal(staleAttempt.OriginalSourceEventId, attempts[1].OriginalSourceEventId);
+        Assert.Equal(staleAttempt.OriginalCausationId, attempts[1].OriginalCausationId);
+        Assert.Equal(staleAttempt.CorrelationId, attempts[1].CorrelationId);
+    }
+
+    [Fact]
+    public async Task Crash_after_owner_effect_recovers_without_duplicate_authoritative_effect()
+    {
+        var startedAt = fixture.TimeProvider.GetUtcNow();
+        var handler = new InterruptAfterEffectReplayHandler();
+        Guid tenantId;
+        Guid operationId;
+        await using (var firstDb = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA))
+        {
+            var firstService = fixture.CreateService(firstDb);
+            var failure = await firstService.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+            var firstCoordinator = new ReplayCoordinator(firstService, [handler]);
+            var operation = await firstCoordinator.RequestReplayForFailureAsync(
+                failure.TenantId, failure.Id, $"effect-crash-{failure.Id:N}", null, null);
+            tenantId = operation.TenantId;
+            operationId = operation.Id;
+            await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                firstCoordinator.ExecuteQueuedReplayOperationAsync(tenantId, operationId, "worker-before-crash"));
+        }
+
+        var future = new FixedTimeProvider(startedAt.Add(DurableOperationService.DefaultAttemptLease).AddSeconds(1));
+        await using var recoveryDb = fixture.CreateContext(tenantId);
+        var recoveryService = fixture.CreateService(recoveryDb, future);
+        var recoveryCoordinator = new ReplayCoordinator(recoveryService, [handler]);
+        var recovered = await recoveryCoordinator.ExecuteQueuedReplayOperationAsync(
+            tenantId, operationId, "worker-after-crash");
+        Assert.Equal(OperationStatuses.Succeeded, recovered.Status);
+        Assert.Equal(1, handler.AuthoritativeEffectCount);
+        Assert.Equal(2, handler.DispatchCount);
+        var attempts = await recoveryDb.OperationAttempts.Where(x => x.OperationId == operationId)
+            .OrderBy(x => x.AttemptNumber).ToListAsync();
+        Assert.Equal(new[] { OperationAttemptStatuses.Abandoned, OperationAttemptStatuses.Succeeded },
+            attempts.Select(x => x.Status));
+    }
+
+    [Fact]
+    public async Task Failure_identity_includes_owner_module()
+    {
+        var source = Guid.NewGuid();
+        await using var db = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA);
+        var service = fixture.CreateService(db);
+        var inventory = await service.RecordFailureAsync(fixture.CreateFailure(source));
+        var finance = await service.RecordFailureAsync(fixture.CreateFailure(source) with
+        {
+            OwnerModule = "FINANCE"
+        });
+        Assert.NotEqual(inventory.Id, finance.Id);
+        Assert.Equal(2, await db.ProcessingFailures.CountAsync(
+            x => x.OriginalSourceEventId == source && x.ProcessorCode == "STOCK_CONSEQUENCE"));
+    }
+
+    [Fact]
+    public async Task Cancellation_and_worker_completion_race_has_one_terminal_winner()
+    {
+        Guid tenantId;
+        Guid operationId;
+        Guid attemptId;
+        Guid leaseToken;
+        await using (var seed = fixture.CreateContext(BatchGDurableOperationsFixture.TenantA))
+        {
+            var service = fixture.CreateService(seed);
+            var failure = await service.RecordFailureAsync(fixture.CreateFailure(Guid.NewGuid()));
+            var coordinator = new ReplayCoordinator(service, []);
+            var operation = await coordinator.RequestReplayForFailureAsync(
+                failure.TenantId, failure.Id, $"cancellation-race-{failure.Id:N}", null, null);
+            operation = await service.TransitionAsync(
+                operation.TenantId, operation.Id, operation.Version, OperationStatuses.Running);
+            var attempt = await service.StartAttemptAsync(operation.TenantId, operation.Id, "race-worker");
+            tenantId = operation.TenantId;
+            operationId = operation.Id;
+            attemptId = attempt.Id;
+            leaseToken = attempt.LeaseToken;
+        }
+
+        var barrier = new ConcurrentSaveBarrier(2);
+        await using var completionDb = fixture.CreateContext(tenantId, barrier);
+        await using var cancellationDb = fixture.CreateContext(tenantId, barrier);
+        var outcomes = await Task.WhenAll(
+            CaptureOperationAsync(fixture.CreateService(completionDb).CompleteReplaySuccessAsync(
+                tenantId, operationId, attemptId, leaseToken, "RESULT", Guid.NewGuid(),
+                """{"result":"RECOVERED"}""")),
+            CaptureOperationAsync(fixture.CreateService(cancellationDb).RequestCancellationAsync(
+                tenantId, operationId)));
+        Assert.Single(outcomes, x => x.Operation is not null);
+        Assert.Single(outcomes, x => x.Error is not null);
+
+        await using var verification = fixture.CreateContext(tenantId);
+        var finalService = fixture.CreateService(verification);
+        var operationState = await finalService.GetOperationAsync(tenantId, operationId);
+        if (operationState.Status == OperationStatuses.CancelRequested)
+            operationState = await finalService.ObserveRequestedCancellationAsync(tenantId, operationId);
+        Assert.Contains(operationState.Status, new[]
+        {
+            OperationStatuses.Succeeded, OperationStatuses.Cancelled
+        });
+        var failureState = await verification.ProcessingFailures.SingleAsync(x =>
+            x.CurrentOperationId == operationId || x.RecoveryOperationId == operationId);
+        if (operationState.Status == OperationStatuses.Succeeded)
+        {
+            Assert.Equal(ProcessingFailureStates.Recovered, failureState.State);
+            Assert.False(failureState.Replayable);
+        }
+        else
+        {
+            Assert.Equal(ProcessingFailureStates.RetryPending, failureState.State);
+            Assert.True(failureState.Replayable);
+        }
     }
 
     public static TheoryData<string, string> RejectedSafeDetails => new()
@@ -521,6 +751,12 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         try { return new(await operation, null); }
         catch (DurableOperationRuleException exception) { return new(null, exception); }
     }
+
+    private static async Task<OperationOutcome> CaptureOperationAsync(Task<Operation> operation)
+    {
+        try { return new(await operation, null); }
+        catch (DurableOperationRuleException exception) { return new(null, exception); }
+    }
 }
 
 public sealed class BatchGDurableOperationsFixture : IAsyncLifetime
@@ -561,7 +797,9 @@ public sealed class BatchGDurableOperationsFixture : IAsyncLifetime
         return new DurableOperationsDbContext(options.Options);
     }
 
-    public DurableOperationService CreateService(DurableOperationsDbContext dbContext) => new(dbContext, TimeProvider);
+    public DurableOperationService CreateService(
+        DurableOperationsDbContext dbContext, TimeProvider? timeProvider = null)
+        => new(dbContext, timeProvider ?? TimeProvider);
 
     public CreateReplayOperationRequest CreateRequest(
         Guid sourceEventId, string? replayRequestKey = null, Guid? tenantId = null,
@@ -581,8 +819,11 @@ public sealed class BatchGDurableOperationsFixture : IAsyncLifetime
             Guid.NewGuid(), "OPERATIONS.TEST.FAILURE", """{"reasonCode":"TEST_FAILURE","retryCount":1}""",
             ProcessingFailureStates.RetryPending, Replayable: true);
 
-    public WorkerHeartbeatUpdate CreateHeartbeat(string workerCode, DateTimeOffset observedAt, int pendingCount)
-        => new(TenantA, workerCode, observedAt, observedAt, null, Guid.NewGuid(), pendingCount, 0, 0,
+    public WorkerHeartbeatUpdate CreateHeartbeat(
+        string workerCode, DateTimeOffset observedAt, int pendingCount,
+        long sequence = 1, Guid? observationId = null)
+        => new(TenantA, workerCode, observationId ?? Guid.NewGuid(), sequence,
+            observedAt, observedAt, null, Guid.NewGuid(), pendingCount, 0, 0,
             pendingCount > 0 ? observedAt : null, null);
 
     public async Task<bool> HasActiveAttemptPartialUniqueIndexAsync()
@@ -701,7 +942,34 @@ public sealed class CancellingReplayHandler : IReplayOwnerHandler
         => Task.FromException<ReplayDispatchResult>(new OperationCanceledException("Controlled cancellation."));
 }
 
+public sealed class InterruptAfterEffectReplayHandler : IReplayOwnerHandler
+{
+    private readonly Dictionary<Guid, Guid> effects = [];
+    public string OwnerModule => "INVENTORY";
+    public string OperationType => "STOCK_CONSEQUENCE";
+    public int DispatchCount { get; private set; }
+    public int AuthoritativeEffectCount => effects.Count;
+
+    public Task<ReplayDispatchResult> ReplayAsync(
+        ReplayDispatchCommand command, CancellationToken cancellationToken = default)
+    {
+        DispatchCount++;
+        if (!effects.TryGetValue(command.OriginalSourceEventId, out var resultId))
+        {
+            resultId = Guid.NewGuid();
+            effects.Add(command.OriginalSourceEventId, resultId);
+        }
+        if (DispatchCount == 1)
+            return Task.FromException<ReplayDispatchResult>(
+                new OperationCanceledException("Host interrupted after authoritative effect."));
+        return Task.FromResult(new ReplayDispatchResult(
+            true, "CONTROLLED_EFFECT", resultId,
+            SafeDetailJson: """{"result":"IDEMPOTENT"}"""));
+    }
+}
+
 public sealed record HeartbeatOutcome(WorkerHeartbeat? Heartbeat, DurableOperationRuleException? Error);
 public sealed record AttemptOutcome(OperationAttempt? Attempt, DurableOperationRuleException? Error);
+public sealed record OperationOutcome(Operation? Operation, DurableOperationRuleException? Error);
 public sealed record OperationsRlsState(string Table, bool Enabled, bool Forced, long PolicyCount);
 public sealed record OperationsRuntimeRoleState(bool CanLogin, bool IsSuperuser, bool BypassesRls);
