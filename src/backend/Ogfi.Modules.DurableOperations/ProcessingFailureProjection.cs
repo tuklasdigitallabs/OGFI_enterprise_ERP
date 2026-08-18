@@ -9,6 +9,8 @@ public static class ProcessingFailureStates
     public const string Stalled = "STALLED";
     public const string Recovered = "RECOVERED";
     public const string Completed = "COMPLETED";
+
+    public static bool IsTerminal(string value) => value is TerminalRejected or Completed;
 }
 
 public static class ProcessingFailureClassifications
@@ -19,6 +21,9 @@ public static class ProcessingFailureClassifications
     public const string MalformedContract = "MALFORMED_CONTRACT";
     public const string Authorization = "AUTHORIZATION";
     public const string SecurityTerminal = "SECURITY_TERMINAL";
+
+    public static bool IsApproved(string value) => value is
+        Transient or Business or ForgedTenant or MalformedContract or Authorization or SecurityTerminal;
 
     public static bool IsTerminalInvalid(string value) => value is
         ForgedTenant or MalformedContract or Authorization or SecurityTerminal;
@@ -46,4 +51,5 @@ public sealed class ProcessingFailureProjection
     public bool Replayable { get; set; }
     public Guid? CurrentOperationId { get; set; }
     public required string State { get; set; }
+    public long Version { get; set; }
 }

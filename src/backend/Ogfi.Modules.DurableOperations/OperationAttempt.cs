@@ -22,4 +22,5 @@ public sealed class OperationAttempt
     public Guid OriginalSourceEventId { get; set; }
     public string? OriginalCausationId { get; set; }
     public required string CorrelationId { get; set; }
+    public long Version { get; set; }
 }

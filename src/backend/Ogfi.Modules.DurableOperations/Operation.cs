@@ -14,6 +14,7 @@ public sealed class Operation
 {
     public Guid Id { get; set; }
     public Guid TenantId { get; set; }
+    public required string ReplayRequestKey { get; set; }
     public required string OperationType { get; set; }
     public required string OwnerModule { get; set; }
     public required string Status { get; set; }

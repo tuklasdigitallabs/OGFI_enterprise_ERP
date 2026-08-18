@@ -34,6 +34,7 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<Guid>("OriginalSourceEventId").HasColumnType("uuid");
             b.Property<Guid?>("OutletId").HasColumnType("uuid");
             b.Property<string>("OwnerModule").IsRequired().HasMaxLength(60).HasColumnType("character varying(60)");
+            b.Property<string>("ReplayRequestKey").IsRequired().HasMaxLength(128).HasColumnType("character varying(128)");
             b.Property<bool>("Replayable").HasColumnType("boolean");
             b.Property<Guid?>("RequestedByMembershipId").HasColumnType("uuid");
             b.Property<Guid?>("RequestedByUserId").HasColumnType("uuid");
@@ -48,8 +49,9 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.HasKey("Id");
             b.HasAlternateKey("TenantId", "Id");
             b.HasIndex("TenantId", "CorrelationId");
+            b.HasIndex("TenantId", "OriginalSourceEventId");
+            b.HasIndex("TenantId", "ReplayRequestKey").IsUnique();
             b.HasIndex("TenantId", "Status", "CreatedAtUtc");
-            b.HasIndex("TenantId", "OwnerModule", "OperationType", "OriginalSourceEventId").IsUnique();
             b.ToTable("operations", "operations", t =>
             {
                 t.HasCheckConstraint("CK_operations_safe_detail_size", "\"SafeDetailJson\" IS NULL OR octet_length(\"SafeDetailJson\"::text) <= 8192");
@@ -72,15 +74,20 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<DateTimeOffset>("StartedAtUtc").HasColumnType("timestamp with time zone");
             b.Property<string>("Status").IsRequired().HasMaxLength(20).HasColumnType("character varying(20)");
             b.Property<Guid>("TenantId").HasColumnType("uuid");
+            b.Property<long>("Version").IsConcurrencyToken().HasColumnType("bigint");
             b.Property<string>("WorkerCode").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
             b.HasKey("Id");
             b.HasAlternateKey("TenantId", "Id");
+            b.HasIndex("TenantId", "OperationId")
+                .IsUnique()
+                .HasFilter("\"Status\" = 'RUNNING'");
             b.HasIndex("TenantId", "OperationId", "AttemptNumber").IsUnique();
             b.ToTable("operation_attempts", "operations", t =>
             {
                 t.HasCheckConstraint("CK_operation_attempt_number", "\"AttemptNumber\" > 0");
                 t.HasCheckConstraint("CK_operation_attempt_safe_detail_size", "octet_length(\"SafeDetailJson\"::text) <= 8192");
                 t.HasCheckConstraint("CK_operation_attempt_status", "\"Status\" IN ('RUNNING','SUCCEEDED','FAILED')");
+                t.HasCheckConstraint("CK_operation_attempt_version", "\"Version\" > 0");
             });
         });
 
@@ -127,16 +134,19 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<string>("SafeErrorCode").IsRequired().HasMaxLength(120).HasColumnType("character varying(120)");
             b.Property<string>("State").IsRequired().HasMaxLength(24).HasColumnType("character varying(24)");
             b.Property<Guid>("TenantId").HasColumnType("uuid");
+            b.Property<long>("Version").IsConcurrencyToken().HasColumnType("bigint");
             b.HasKey("Id");
             b.HasAlternateKey("TenantId", "Id");
             b.HasIndex("TenantId", "CurrentOperationId");
             b.HasIndex("TenantId", "State", "LastFailedAtUtc");
-            b.HasIndex("TenantId", "OwnerModule", "ProcessorCode", "OriginalSourceEventId").IsUnique();
+            b.HasIndex("TenantId", "ProcessorCode", "OriginalSourceEventId").IsUnique();
             b.ToTable("processing_failure_projections", "operations", t =>
             {
                 t.HasCheckConstraint("CK_processing_failure_attempts", "\"AttemptCount\" > 0");
+                t.HasCheckConstraint("CK_processing_failure_classification", "\"FailureClassification\" IN ('TRANSIENT','BUSINESS','FORGED_TENANT','MALFORMED_CONTRACT','AUTHORIZATION','SECURITY_TERMINAL')");
                 t.HasCheckConstraint("CK_processing_failure_safe_detail_size", "octet_length(\"SafeDetailJson\"::text) <= 8192");
                 t.HasCheckConstraint("CK_processing_failure_state", "\"State\" IN ('PENDING','RETRY_PENDING','BUSINESS_FAILED','TERMINAL_REJECTED','STALLED','RECOVERED','COMPLETED')");
+                t.HasCheckConstraint("CK_processing_failure_version", "\"Version\" > 0");
             });
         });
 

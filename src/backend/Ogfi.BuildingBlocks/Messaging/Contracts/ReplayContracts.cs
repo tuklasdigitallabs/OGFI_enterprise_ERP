@@ -16,7 +16,8 @@ public sealed record ReplayDispatchResult(
     string? ResultReferenceType = null,
     Guid? ResultReferenceId = null,
     string? SafeErrorCode = null,
-    string SafeDetailJson = "{}");
+    string SafeDetailJson = "{}",
+    bool Retryable = false);
 
 public interface IReplayOwnerHandler
 {
