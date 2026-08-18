@@ -5,6 +5,8 @@ public sealed class WorkerHeartbeat
     public Guid Id { get; set; }
     public Guid TenantId { get; set; }
     public required string WorkerCode { get; set; }
+    public Guid ObservationId { get; set; }
+    public long ObservationSequence { get; set; }
     public DateTimeOffset LastIterationStartedAtUtc { get; set; }
     public DateTimeOffset? LastSucceededAtUtc { get; set; }
     public DateTimeOffset? LastFailedAtUtc { get; set; }

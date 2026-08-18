@@ -11,6 +11,9 @@ public static class ProcessingFailureStates
     public const string Completed = "COMPLETED";
 
     public static bool IsTerminal(string value) => value is TerminalRejected or Completed;
+
+    public static bool IsReplayEligible(string value) => value is
+        Pending or RetryPending or BusinessFailed or Stalled;
 }
 
 public static class ProcessingFailureClassifications
@@ -50,6 +53,7 @@ public sealed class ProcessingFailureProjection
     public required string SafeDetailJson { get; set; }
     public bool Replayable { get; set; }
     public Guid? CurrentOperationId { get; set; }
+    public Guid? RecoveryOperationId { get; set; }
     public required string State { get; set; }
     public long Version { get; set; }
 }

@@ -66,6 +66,11 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<int>("AttemptNumber").HasColumnType("integer");
             b.Property<DateTimeOffset?>("CompletedAtUtc").HasColumnType("timestamp with time zone");
             b.Property<string>("CorrelationId").IsRequired().HasMaxLength(64).HasColumnType("character varying(64)");
+            b.Property<DateTimeOffset>("LastLeaseHeartbeatAtUtc").HasColumnType("timestamp with time zone");
+            b.Property<DateTimeOffset>("LeaseAcquiredAtUtc").HasColumnType("timestamp with time zone");
+            b.Property<DateTimeOffset>("LeaseExpiresAtUtc").HasColumnType("timestamp with time zone");
+            b.Property<string>("LeaseOwner").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
+            b.Property<Guid>("LeaseToken").HasColumnType("uuid");
             b.Property<Guid>("OperationId").HasColumnType("uuid");
             b.Property<string>("OriginalCausationId").HasMaxLength(128).HasColumnType("character varying(128)");
             b.Property<Guid>("OriginalSourceEventId").HasColumnType("uuid");
@@ -85,8 +90,9 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.ToTable("operation_attempts", "operations", t =>
             {
                 t.HasCheckConstraint("CK_operation_attempt_number", "\"AttemptNumber\" > 0");
+                t.HasCheckConstraint("CK_operation_attempt_lease", "\"LeaseExpiresAtUtc\" >= \"LeaseAcquiredAtUtc\" AND \"LastLeaseHeartbeatAtUtc\" >= \"LeaseAcquiredAtUtc\"");
                 t.HasCheckConstraint("CK_operation_attempt_safe_detail_size", "octet_length(\"SafeDetailJson\"::text) <= 8192");
-                t.HasCheckConstraint("CK_operation_attempt_status", "\"Status\" IN ('RUNNING','SUCCEEDED','FAILED')");
+                t.HasCheckConstraint("CK_operation_attempt_status", "\"Status\" IN ('RUNNING','SUCCEEDED','FAILED','ABANDONED')");
                 t.HasCheckConstraint("CK_operation_attempt_version", "\"Version\" > 0");
             });
         });
@@ -127,6 +133,7 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<Guid?>("OutletId").HasColumnType("uuid");
             b.Property<string>("OwnerModule").IsRequired().HasMaxLength(60).HasColumnType("character varying(60)");
             b.Property<string>("ProcessorCode").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
+            b.Property<Guid?>("RecoveryOperationId").HasColumnType("uuid");
             b.Property<bool>("Replayable").HasColumnType("boolean");
             b.Property<Guid>("ResourceId").HasColumnType("uuid");
             b.Property<string>("ResourceType").IsRequired().HasMaxLength(100).HasColumnType("character varying(100)");
@@ -138,8 +145,9 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.HasKey("Id");
             b.HasAlternateKey("TenantId", "Id");
             b.HasIndex("TenantId", "CurrentOperationId");
+            b.HasIndex("TenantId", "RecoveryOperationId");
             b.HasIndex("TenantId", "State", "LastFailedAtUtc");
-            b.HasIndex("TenantId", "ProcessorCode", "OriginalSourceEventId").IsUnique();
+            b.HasIndex("TenantId", "OwnerModule", "ProcessorCode", "OriginalSourceEventId").IsUnique();
             b.ToTable("processing_failure_projections", "operations", t =>
             {
                 t.HasCheckConstraint("CK_processing_failure_attempts", "\"AttemptCount\" > 0");
@@ -159,6 +167,8 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.Property<string>("LastSafeErrorCode").HasMaxLength(120).HasColumnType("character varying(120)");
             b.Property<DateTimeOffset?>("LastSucceededAtUtc").HasColumnType("timestamp with time zone");
             b.Property<DateTimeOffset?>("OldestPendingAtUtc").HasColumnType("timestamp with time zone");
+            b.Property<Guid>("ObservationId").HasColumnType("uuid");
+            b.Property<long>("ObservationSequence").HasColumnType("bigint");
             b.Property<int>("PendingCount").HasColumnType("integer");
             b.Property<int>("RetryPendingCount").HasColumnType("integer");
             b.Property<Guid>("TenantId").HasColumnType("uuid");
@@ -172,6 +182,7 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.ToTable("worker_heartbeats", "operations", t =>
             {
                 t.HasCheckConstraint("CK_worker_heartbeat_counts", "\"PendingCount\" >= 0 AND \"RetryPendingCount\" >= 0 AND \"TerminalFailureCount\" >= 0");
+                t.HasCheckConstraint("CK_worker_heartbeat_observation_sequence", "\"ObservationSequence\" > 0");
             });
         });
 
@@ -200,6 +211,12 @@ partial class DurableOperationsDbContextModelSnapshot : ModelSnapshot
             b.HasOne("Ogfi.Modules.DurableOperations.Operation", null)
                 .WithMany()
                 .HasForeignKey("TenantId", "CurrentOperationId")
+                .HasPrincipalKey("TenantId", "Id")
+                .OnDelete(DeleteBehavior.Restrict);
+
+            b.HasOne("Ogfi.Modules.DurableOperations.Operation", null)
+                .WithMany()
+                .HasForeignKey("TenantId", "RecoveryOperationId")
                 .HasPrincipalKey("TenantId", "Id")
                 .OnDelete(DeleteBehavior.Restrict);
         });

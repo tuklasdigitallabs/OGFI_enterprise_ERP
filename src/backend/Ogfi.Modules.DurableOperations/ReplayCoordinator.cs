@@ -8,38 +8,20 @@ public sealed class ReplayCoordinator(
 {
     private const int MaximumReplayAttempts = 3;
 
-    public async Task<Operation> RequestReplayForFailureAsync(
+    public Task<Operation> RequestReplayForFailureAsync(
         Guid tenantId,
         Guid failureId,
         string replayRequestKey,
         Guid? requestedByUserId,
         Guid? requestedByMembershipId,
         CancellationToken cancellationToken = default)
-    {
-        var failure = await operations.GetFailureAsync(tenantId, failureId, cancellationToken);
-        if (!failure.Replayable || ProcessingFailureStates.IsTerminal(failure.State)
-                                || ProcessingFailureClassifications.IsTerminalInvalid(failure.FailureClassification))
-            throw new DurableOperationRuleException(
-                "OPERATIONS.REPLAY.NOT_ALLOWED", "Persisted failure is terminal or non-replayable.");
+        => operations.CreateOrReuseReplayForFailureAsync(
+            tenantId, failureId, replayRequestKey, requestedByUserId,
+            requestedByMembershipId, cancellationToken);
 
-        var operation = await operations.CreateOrReuseReplayOperationAsync(
-            new CreateReplayOperationRequest(
-                tenantId,
-                replayRequestKey,
-                failure.ProcessorCode,
-                failure.OwnerModule,
-                failure.OriginalSourceEventId,
-                failure.OriginalCausationId,
-                failure.CorrelationId,
-                failure.LegalEntityId,
-                failure.OutletId,
-                requestedByUserId,
-                requestedByMembershipId,
-                Replayable: true),
-            cancellationToken);
-        await operations.LinkFailureToOperationAsync(tenantId, failureId, operation.Id, cancellationToken);
-        return operation;
-    }
+    public Task<Operation> RequestCancellationAsync(
+        Guid tenantId, Guid operationId, CancellationToken cancellationToken = default)
+        => operations.RequestCancellationAsync(tenantId, operationId, cancellationToken);
 
     public async Task<Operation> ExecuteQueuedReplayOperationAsync(
         Guid tenantId,
@@ -48,25 +30,69 @@ public sealed class ReplayCoordinator(
         CancellationToken cancellationToken = default)
     {
         var operation = await operations.GetOperationAsync(tenantId, operationId, cancellationToken);
+        if (operation.Status == OperationStatuses.CancelRequested)
+            return await operations.ObserveRequestedCancellationAsync(
+                tenantId, operation.Id, CancellationToken.None);
         var handler = FindHandler(operation.OwnerModule, operation.OperationType);
         if (operation.Status == OperationStatuses.Queued)
         {
-            operation = await operations.TransitionAsync(
-                tenantId, operation.Id, operation.Version, OperationStatuses.Running,
-                cancellationToken: cancellationToken);
+            try
+            {
+                operation = await operations.TransitionAsync(
+                    tenantId, operation.Id, operation.Version, OperationStatuses.Running,
+                    cancellationToken: cancellationToken);
+            }
+            catch (DurableOperationRuleException exception)
+                when (exception.Code == "OPERATIONS.TRANSITION.VERSION_CONFLICT")
+            {
+                operation = await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
+                if (operation.Status == OperationStatuses.CancelRequested)
+                    return await operations.ObserveRequestedCancellationAsync(
+                        tenantId, operation.Id, CancellationToken.None);
+                throw;
+            }
         }
         else if (operation.Status != OperationStatuses.Running)
         {
             throw new DurableOperationRuleException(
-                "OPERATIONS.REPLAY.NOT_EXECUTABLE", "Only queued or retry-eligible running operations can execute.");
+                "OPERATIONS.REPLAY.NOT_EXECUTABLE",
+                "Only queued, running, or cancellation-requested operations can execute.");
         }
 
-        var attempt = await operations.StartAttemptAsync(
-            tenantId, operation.Id, workerCode,
-            """{"stage":"OWNER_DISPATCH","status":"RUNNING"}""", cancellationToken);
-        await operations.AddNextCheckpointAsync(
-            tenantId, operation.Id, "OWNER_DISPATCH", 10,
-            $$"""{"stage":"OWNER_DISPATCH","retryCount":{{attempt.AttemptNumber}}}""", cancellationToken);
+        OperationAttempt attempt;
+        try
+        {
+            attempt = await operations.StartAttemptAsync(
+                tenantId, operation.Id, workerCode,
+                """{"stage":"OWNER_DISPATCH","status":"RUNNING"}""",
+                cancellationToken: cancellationToken);
+        }
+        catch (DurableOperationRuleException exception)
+            when (exception.Code == "OPERATIONS.ATTEMPT.MAXIMUM_EXCEEDED")
+        {
+            operation = await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
+            return await operations.TransitionAsync(
+                tenantId, operation.Id, operation.Version, OperationStatuses.Failed,
+                safeErrorCode: exception.Code, safeDetailJson: "{}",
+                cancellationToken: CancellationToken.None);
+        }
+
+        try
+        {
+            await operations.AddNextCheckpointAsync(
+                tenantId, operation.Id, "OWNER_DISPATCH", 10,
+                $$"""{"stage":"OWNER_DISPATCH","retryCount":{{attempt.AttemptNumber}}}""",
+                cancellationToken);
+        }
+        catch (DurableOperationRuleException exception)
+            when (exception.Code == "OPERATIONS.CHECKPOINT.OPERATION_NOT_RUNNING")
+        {
+            operation = await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
+            if (operation.Status == OperationStatuses.CancelRequested)
+                return await operations.ObserveRequestedCancellationAsync(
+                    tenantId, operation.Id, CancellationToken.None);
+            throw;
+        }
 
         ReplayDispatchResult result;
         try
@@ -74,71 +100,81 @@ public sealed class ReplayCoordinator(
             result = await handler.ReplayAsync(
                 new ReplayDispatchCommand(
                     tenantId, operation.Id, operation.OperationType, operation.OwnerModule,
-                    operation.OriginalSourceEventId, operation.OriginalCausationId, operation.CorrelationId,
-                    operation.LegalEntityId, operation.OutletId),
+                    operation.OriginalSourceEventId, operation.OriginalCausationId,
+                    operation.CorrelationId, operation.LegalEntityId, operation.OutletId),
                 cancellationToken);
         }
         catch (OperationCanceledException)
         {
-            await CompleteCancellationAsync(tenantId, operation, attempt);
+            // Host interruption is not a business cancellation. The RUNNING Attempt and
+            // its lease remain recoverable and will be abandoned only after lease expiry.
             throw;
         }
         catch (Exception)
         {
-            const string safeErrorCode = "OPERATIONS.REPLAY.OWNER_HANDLER_FAILED";
-            await operations.CompleteAttemptAsync(
-                tenantId, attempt.Id, succeeded: false, safeErrorCode, "{}", CancellationToken.None);
-            var exhausted = attempt.AttemptNumber >= MaximumReplayAttempts;
-            await operations.AddNextCheckpointAsync(
-                tenantId, operation.Id, exhausted ? "OWNER_FAILED" : "OWNER_RETRY_PENDING",
-                exhausted ? 100 : 50, """{"reasonCode":"OWNER_HANDLER_FAILED"}""", CancellationToken.None);
-            if (!exhausted) return await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
-            return await operations.TransitionAsync(
-                tenantId, operation.Id, operation.Version, OperationStatuses.Failed,
-                safeErrorCode: safeErrorCode, safeDetailJson: "{}", cancellationToken: CancellationToken.None);
+            operation = await ObserveCancellationIfRequestedAsync(tenantId, operation.Id);
+            if (operation.Status == OperationStatuses.Cancelled) return operation;
+            return await CompleteFailedAttemptAsync(
+                tenantId, operation, attempt,
+                "OPERATIONS.REPLAY.OWNER_HANDLER_FAILED", "{}", retryable: true);
         }
 
+        operation = await ObserveCancellationIfRequestedAsync(tenantId, operation.Id);
+        if (operation.Status == OperationStatuses.Cancelled) return operation;
         if (result.Succeeded)
         {
-            await operations.CompleteAttemptAsync(
-                tenantId, attempt.Id, succeeded: true, safeDetailJson: result.SafeDetailJson,
-                cancellationToken: cancellationToken);
-            await operations.AddNextCheckpointAsync(
-                tenantId, operation.Id, "OWNER_SUCCEEDED", 100, result.SafeDetailJson, cancellationToken);
-            return await operations.TransitionAsync(
-                tenantId, operation.Id, operation.Version, OperationStatuses.Succeeded,
-                result.ResultReferenceType, result.ResultReferenceId,
-                safeDetailJson: result.SafeDetailJson, cancellationToken: cancellationToken);
+            try
+            {
+                return await operations.CompleteReplaySuccessAsync(
+                    tenantId, operation.Id, attempt.Id, attempt.LeaseToken,
+                    result.ResultReferenceType, result.ResultReferenceId,
+                    result.SafeDetailJson, cancellationToken);
+            }
+            catch (DurableOperationRuleException exception)
+                when (exception.Code == "OPERATIONS.CANCELLATION.PENDING")
+            {
+                return await operations.ObserveRequestedCancellationAsync(
+                    tenantId, operation.Id, CancellationToken.None);
+            }
         }
 
-        var resultErrorCode = result.SafeErrorCode ?? "OPERATIONS.REPLAY.OWNER_REJECTED";
-        await operations.CompleteAttemptAsync(
-            tenantId, attempt.Id, succeeded: false, resultErrorCode, result.SafeDetailJson, cancellationToken);
-        var resultExhausted = !result.Retryable || attempt.AttemptNumber >= MaximumReplayAttempts;
-        await operations.AddNextCheckpointAsync(
-            tenantId, operation.Id, resultExhausted ? "OWNER_FAILED" : "OWNER_RETRY_PENDING",
-            resultExhausted ? 100 : 50, result.SafeDetailJson, cancellationToken);
-        if (!resultExhausted) return await operations.GetOperationAsync(tenantId, operation.Id, cancellationToken);
-        return await operations.TransitionAsync(
-            tenantId, operation.Id, operation.Version, OperationStatuses.Failed,
-            safeErrorCode: resultErrorCode, safeDetailJson: result.SafeDetailJson,
-            cancellationToken: cancellationToken);
+        return await CompleteFailedAttemptAsync(
+            tenantId, operation, attempt,
+            result.SafeErrorCode ?? "OPERATIONS.REPLAY.OWNER_REJECTED",
+            result.SafeDetailJson, result.Retryable);
     }
 
-    private async Task CompleteCancellationAsync(Guid tenantId, Operation operation, OperationAttempt attempt)
+    private async Task<Operation> ObserveCancellationIfRequestedAsync(Guid tenantId, Guid operationId)
     {
-        const string safeErrorCode = "OPERATIONS.REPLAY.CANCELLED";
+        var current = await operations.GetOperationAsync(tenantId, operationId, CancellationToken.None);
+        return current.Status == OperationStatuses.CancelRequested
+            ? await operations.ObserveRequestedCancellationAsync(
+                tenantId, operationId, CancellationToken.None)
+            : current;
+    }
+
+    private async Task<Operation> CompleteFailedAttemptAsync(
+        Guid tenantId,
+        Operation operation,
+        OperationAttempt attempt,
+        string safeErrorCode,
+        string safeDetailJson,
+        bool retryable)
+    {
         await operations.CompleteAttemptAsync(
-            tenantId, attempt.Id, succeeded: false, safeErrorCode, "{}", CancellationToken.None);
+            tenantId, attempt.Id, attempt.LeaseToken, succeeded: false,
+            safeErrorCode, safeDetailJson, CancellationToken.None);
+        var exhausted = !retryable || attempt.AttemptNumber >= MaximumReplayAttempts;
         await operations.AddNextCheckpointAsync(
-            tenantId, operation.Id, "OWNER_CANCELLED", 100,
-            """{"reasonCode":"EXECUTION_CANCELLED"}""", CancellationToken.None);
-        operation = await operations.TransitionAsync(
-            tenantId, operation.Id, operation.Version, OperationStatuses.CancelRequested,
-            safeErrorCode: safeErrorCode, cancellationToken: CancellationToken.None);
-        await operations.TransitionAsync(
-            tenantId, operation.Id, operation.Version, OperationStatuses.Cancelled,
-            safeErrorCode: safeErrorCode, cancellationToken: CancellationToken.None);
+            tenantId, operation.Id, exhausted ? "OWNER_FAILED" : "OWNER_RETRY_PENDING",
+            exhausted ? 100 : 50, safeDetailJson, CancellationToken.None);
+        if (!exhausted)
+            return await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
+        operation = await operations.GetOperationAsync(tenantId, operation.Id, CancellationToken.None);
+        return await operations.TransitionAsync(
+            tenantId, operation.Id, operation.Version, OperationStatuses.Failed,
+            safeErrorCode: safeErrorCode, safeDetailJson: safeDetailJson,
+            cancellationToken: CancellationToken.None);
     }
 
     private IReplayOwnerHandler FindHandler(string ownerModule, string operationType)

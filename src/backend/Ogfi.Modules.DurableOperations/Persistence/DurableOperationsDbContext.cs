@@ -45,14 +45,16 @@ public sealed class DurableOperationsDbContext(DbContextOptions<DurableOperation
             entity.ToTable("operation_attempts", table =>
             {
                 table.HasCheckConstraint("CK_operation_attempt_number", "\"AttemptNumber\" > 0");
-                table.HasCheckConstraint("CK_operation_attempt_status", "\"Status\" IN ('RUNNING','SUCCEEDED','FAILED')");
+                table.HasCheckConstraint("CK_operation_attempt_status", "\"Status\" IN ('RUNNING','SUCCEEDED','FAILED','ABANDONED')");
                 table.HasCheckConstraint("CK_operation_attempt_version", "\"Version\" > 0");
+                table.HasCheckConstraint("CK_operation_attempt_lease", "\"LeaseExpiresAtUtc\" >= \"LeaseAcquiredAtUtc\" AND \"LastLeaseHeartbeatAtUtc\" >= \"LeaseAcquiredAtUtc\"");
                 table.HasCheckConstraint("CK_operation_attempt_safe_detail_size", "octet_length(\"SafeDetailJson\"::text) <= 8192");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.TenantId, x.Id });
             entity.Property(x => x.Status).HasMaxLength(20);
             entity.Property(x => x.WorkerCode).HasMaxLength(100);
+            entity.Property(x => x.LeaseOwner).HasMaxLength(100);
             entity.Property(x => x.SafeErrorCode).HasMaxLength(120);
             entity.Property(x => x.SafeDetailJson).HasColumnType("jsonb");
             entity.Property(x => x.OriginalCausationId).HasMaxLength(128);
@@ -92,6 +94,7 @@ public sealed class DurableOperationsDbContext(DbContextOptions<DurableOperation
             entity.ToTable("worker_heartbeats", table =>
             {
                 table.HasCheckConstraint("CK_worker_heartbeat_counts", "\"PendingCount\" >= 0 AND \"RetryPendingCount\" >= 0 AND \"TerminalFailureCount\" >= 0");
+                table.HasCheckConstraint("CK_worker_heartbeat_observation_sequence", "\"ObservationSequence\" > 0");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.TenantId, x.Id });
@@ -123,10 +126,15 @@ public sealed class DurableOperationsDbContext(DbContextOptions<DurableOperation
             entity.Property(x => x.SafeDetailJson).HasColumnType("jsonb");
             entity.Property(x => x.State).HasMaxLength(24);
             entity.Property(x => x.Version).IsConcurrencyToken();
-            entity.HasIndex(x => new { x.TenantId, x.ProcessorCode, x.OriginalSourceEventId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerModule, x.ProcessorCode, x.OriginalSourceEventId }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.State, x.LastFailedAtUtc });
             entity.HasOne<Operation>().WithMany()
                 .HasForeignKey(x => new { x.TenantId, x.CurrentOperationId })
+                .HasPrincipalKey(x => new { x.TenantId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(x => new { x.TenantId, x.RecoveryOperationId });
+            entity.HasOne<Operation>().WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.RecoveryOperationId })
                 .HasPrincipalKey(x => new { x.TenantId, x.Id })
                 .OnDelete(DeleteBehavior.Restrict);
         });

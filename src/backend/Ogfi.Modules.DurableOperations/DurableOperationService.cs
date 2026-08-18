@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Ogfi.Modules.DurableOperations.Persistence;
@@ -23,6 +24,8 @@ public sealed record CreateReplayOperationRequest(
 public sealed record WorkerHeartbeatUpdate(
     Guid TenantId,
     string WorkerCode,
+    Guid ObservationId,
+    long ObservationSequence,
     DateTimeOffset LastIterationStartedAtUtc,
     DateTimeOffset? LastSucceededAtUtc,
     DateTimeOffset? LastFailedAtUtc,
@@ -56,6 +59,8 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
 {
     private const int MaximumPageSize = 100;
     private const int MaximumConcurrencyRetries = 5;
+    private const int MaximumReplayAttempts = 3;
+    public static readonly TimeSpan DefaultAttemptLease = TimeSpan.FromMinutes(5);
     private static readonly IReadOnlyDictionary<string, HashSet<string>> AllowedTransitions =
         new Dictionary<string, HashSet<string>>(StringComparer.Ordinal)
         {
@@ -104,6 +109,85 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
             EnsureEquivalent(existing, request, ownerModule, operationType, causationId, correlationId);
             return existing;
         }
+    }
+
+    public async Task<Operation> CreateOrReuseReplayForFailureAsync(
+        Guid tenantId,
+        Guid failureId,
+        string replayRequestKey,
+        Guid? requestedByUserId,
+        Guid? requestedByMembershipId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTenant(tenantId);
+        var normalizedKey = Required(replayRequestKey, 128, "replay request key");
+        for (var retry = 0; retry < MaximumConcurrencyRetries; retry++)
+        {
+            dbContext.ChangeTracker.Clear();
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted, cancellationToken);
+            try
+            {
+                var failure = await dbContext.ProcessingFailures.SingleOrDefaultAsync(
+                    x => x.TenantId == tenantId && x.Id == failureId, cancellationToken)
+                    ?? throw new DurableOperationRuleException(
+                        "OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
+                EnsureReplayEligible(failure);
+
+                var request = new CreateReplayOperationRequest(
+                    tenantId, normalizedKey, failure.ProcessorCode, failure.OwnerModule,
+                    failure.OriginalSourceEventId, failure.OriginalCausationId, failure.CorrelationId,
+                    failure.LegalEntityId, failure.OutletId, requestedByUserId,
+                    requestedByMembershipId, Replayable: true);
+                var existing = await dbContext.Operations.SingleOrDefaultAsync(
+                    x => x.TenantId == tenantId && x.ReplayRequestKey == normalizedKey, cancellationToken);
+                if (existing is not null)
+                {
+                    EnsureEquivalent(existing, request, failure.OwnerModule, failure.ProcessorCode,
+                        failure.OriginalCausationId, failure.CorrelationId);
+                    if (failure.CurrentOperationId == existing.Id)
+                    {
+                        await transaction.CommitAsync(cancellationToken);
+                        return existing;
+                    }
+                    await EnsureNoActiveReplayAsync(failure, cancellationToken);
+                    failure.CurrentOperationId = existing.Id;
+                    failure.Version++;
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return existing;
+                }
+
+                await EnsureNoActiveReplayAsync(failure, cancellationToken);
+                var operation = new Operation
+                {
+                    Id = Guid.NewGuid(), TenantId = tenantId, ReplayRequestKey = normalizedKey,
+                    OperationType = failure.ProcessorCode, OwnerModule = failure.OwnerModule,
+                    Status = OperationStatuses.Queued, OriginalSourceEventId = failure.OriginalSourceEventId,
+                    OriginalCausationId = failure.OriginalCausationId, CorrelationId = failure.CorrelationId,
+                    LegalEntityId = failure.LegalEntityId, OutletId = failure.OutletId,
+                    RequestedByUserId = requestedByUserId, RequestedByMembershipId = requestedByMembershipId,
+                    CreatedAtUtc = timeProvider.GetUtcNow(), Replayable = true, Version = 1
+                };
+                dbContext.Operations.Add(operation);
+                failure.CurrentOperationId = operation.Id;
+                failure.Version++;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return operation;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+            catch (DbUpdateException exception) when (IsUniqueViolation(exception))
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+        }
+        throw new DurableOperationRuleException(
+            "OPERATIONS.FAILURE.CONCURRENCY_CONFLICT",
+            "Replay operation and failure linkage could not be persisted after bounded retries.");
     }
 
     public async Task<Operation> GetOperationAsync(Guid tenantId, Guid operationId, CancellationToken cancellationToken = default)
@@ -160,55 +244,168 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         }
     }
 
+    public async Task<Operation> RequestCancellationAsync(
+        Guid tenantId, Guid operationId, CancellationToken cancellationToken = default)
+    {
+        var operation = await GetOperationAsync(tenantId, operationId, cancellationToken);
+        if (operation.Status == OperationStatuses.CancelRequested) return operation;
+        if (operation.Status is not (OperationStatuses.Queued or OperationStatuses.Running))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.CANCELLATION.NOT_ALLOWED", "Only queued or running operations may request cancellation.");
+        return await TransitionAsync(
+            tenantId, operationId, operation.Version, OperationStatuses.CancelRequested,
+            cancellationToken: cancellationToken);
+    }
+
+    public async Task<Operation> ObserveRequestedCancellationAsync(
+        Guid tenantId, Guid operationId, CancellationToken cancellationToken = default)
+    {
+        dbContext.ChangeTracker.Clear();
+        var operation = await dbContext.Operations.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == operationId, cancellationToken)
+            ?? throw new DurableOperationRuleException("OPERATIONS.NOT_FOUND", "Operation was not found.");
+        if (operation.Status != OperationStatuses.CancelRequested)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.CANCELLATION.NOT_REQUESTED", "Cancellation must be persisted before a worker may cancel.");
+        var now = timeProvider.GetUtcNow();
+        var active = await dbContext.OperationAttempts.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.OperationId == operationId
+                 && x.Status == OperationAttemptStatuses.Running, cancellationToken);
+        if (active is not null)
+        {
+            active.Status = OperationAttemptStatuses.Abandoned;
+            active.CompletedAtUtc = now;
+            active.SafeErrorCode = "OPERATIONS.ATTEMPT.EXPLICIT_CANCELLATION";
+            active.SafeDetailJson = SafeDetailPolicy.Normalize(
+                """{"reasonCode":"EXPLICIT_CANCELLATION"}""");
+            active.Version++;
+        }
+        operation.Status = OperationStatuses.Cancelled;
+        operation.CompletedAtUtc = now;
+        operation.SafeErrorCode = "OPERATIONS.REPLAY.CANCELLED";
+        operation.SafeDetailJson = SafeDetailPolicy.Normalize(
+            """{"reasonCode":"EXPLICIT_CANCELLATION"}""");
+        operation.Version++;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return operation;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new DurableOperationRuleException(
+                "OPERATIONS.CANCELLATION.RACE", "Cancellation raced with worker completion.");
+        }
+    }
+
     public async Task<OperationAttempt> StartAttemptAsync(
         Guid tenantId, Guid operationId, string workerCode, string safeDetailJson = "{}",
-        CancellationToken cancellationToken = default)
+        TimeSpan? leaseDuration = null, CancellationToken cancellationToken = default)
     {
         var normalizedWorker = NormalizeCode(workerCode, 100, "worker code");
         var normalizedDetail = SafeDetailPolicy.Normalize(safeDetailJson);
+        var duration = leaseDuration ?? DefaultAttemptLease;
+        if (duration <= TimeSpan.Zero || duration > TimeSpan.FromMinutes(30))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_INVALID", "Attempt lease must be positive and no longer than 30 minutes.");
         for (var retry = 0; retry < MaximumConcurrencyRetries; retry++)
         {
             dbContext.ChangeTracker.Clear();
-            var operation = await dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
-                x => x.TenantId == tenantId && x.Id == operationId, cancellationToken)
-                ?? throw new DurableOperationRuleException("OPERATIONS.NOT_FOUND", "Operation was not found.");
-            if (operation.Status != OperationStatuses.Running)
-                throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.OPERATION_NOT_RUNNING", "Attempts require a running operation.");
-            if (await dbContext.OperationAttempts.AsNoTracking().AnyAsync(
-                    x => x.TenantId == tenantId && x.OperationId == operationId
-                         && x.Status == OperationAttemptStatuses.Running, cancellationToken))
-                throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.ACTIVE_EXISTS", "A running attempt already exists.");
-            var nextAttempt = (await dbContext.OperationAttempts.AsNoTracking()
-                .Where(x => x.TenantId == tenantId && x.OperationId == operationId)
-                .MaxAsync(x => (int?)x.AttemptNumber, cancellationToken) ?? 0) + 1;
-            var attempt = new OperationAttempt
-            {
-                Id = Guid.NewGuid(), TenantId = tenantId, OperationId = operationId, AttemptNumber = nextAttempt,
-                Status = OperationAttemptStatuses.Running, WorkerCode = normalizedWorker,
-                StartedAtUtc = timeProvider.GetUtcNow(), SafeDetailJson = normalizedDetail,
-                OriginalSourceEventId = operation.OriginalSourceEventId,
-                OriginalCausationId = operation.OriginalCausationId, CorrelationId = operation.CorrelationId, Version = 1
-            };
-            dbContext.OperationAttempts.Add(attempt);
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(
+                IsolationLevel.ReadCommitted, cancellationToken);
             try
             {
+                var operation = await dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
+                    x => x.TenantId == tenantId && x.Id == operationId, cancellationToken)
+                    ?? throw new DurableOperationRuleException("OPERATIONS.NOT_FOUND", "Operation was not found.");
+                if (operation.Status != OperationStatuses.Running)
+                    throw new DurableOperationRuleException(
+                        "OPERATIONS.ATTEMPT.OPERATION_NOT_RUNNING", "Attempts require a running operation.");
+                var now = timeProvider.GetUtcNow();
+                var active = await dbContext.OperationAttempts.SingleOrDefaultAsync(
+                    x => x.TenantId == tenantId && x.OperationId == operationId
+                         && x.Status == OperationAttemptStatuses.Running, cancellationToken);
+                if (active is not null && active.LeaseExpiresAtUtc > now)
+                    throw new DurableOperationRuleException(
+                        "OPERATIONS.ATTEMPT.ACTIVE_EXISTS", "An unexpired attempt lease already owns this operation.");
+                if (active is not null)
+                {
+                    active.Status = OperationAttemptStatuses.Abandoned;
+                    active.CompletedAtUtc = now;
+                    active.SafeErrorCode = "OPERATIONS.ATTEMPT.STALE_LEASE";
+                    active.SafeDetailJson = SafeDetailPolicy.Normalize(
+                        """{"reasonCode":"STALE_LEASE"}""");
+                    active.Version++;
+                }
+                var nextAttempt = (await dbContext.OperationAttempts
+                    .Where(x => x.TenantId == tenantId && x.OperationId == operationId)
+                    .MaxAsync(x => (int?)x.AttemptNumber, cancellationToken) ?? 0) + 1;
+                if (nextAttempt > MaximumReplayAttempts)
+                    throw new DurableOperationRuleException(
+                        "OPERATIONS.ATTEMPT.MAXIMUM_EXCEEDED", "Maximum replay attempts have been exhausted.");
+                var attempt = new OperationAttempt
+                {
+                    Id = Guid.NewGuid(), TenantId = tenantId, OperationId = operationId,
+                    AttemptNumber = nextAttempt, Status = OperationAttemptStatuses.Running,
+                    WorkerCode = normalizedWorker, LeaseOwner = normalizedWorker, LeaseToken = Guid.NewGuid(),
+                    LeaseAcquiredAtUtc = now, LeaseExpiresAtUtc = now.Add(duration),
+                    LastLeaseHeartbeatAtUtc = now, StartedAtUtc = now, SafeDetailJson = normalizedDetail,
+                    OriginalSourceEventId = operation.OriginalSourceEventId,
+                    OriginalCausationId = operation.OriginalCausationId,
+                    CorrelationId = operation.CorrelationId, Version = 1
+                };
+                dbContext.OperationAttempts.Add(attempt);
                 await dbContext.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
                 return attempt;
             }
             catch (DbUpdateException exception) when (IsUniqueViolation(exception))
             {
-                dbContext.ChangeTracker.Clear();
-                if (await dbContext.OperationAttempts.AsNoTracking().AnyAsync(
-                        x => x.TenantId == tenantId && x.OperationId == operationId
-                             && x.Status == OperationAttemptStatuses.Running, cancellationToken))
-                    throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.ACTIVE_EXISTS", "A running attempt already exists.");
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
             }
         }
         throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.SEQUENCE_CONFLICT", "Attempt sequence could not be allocated after bounded retries.");
     }
 
+    public async Task<OperationAttempt> RenewAttemptLeaseAsync(
+        Guid tenantId, Guid attemptId, Guid leaseToken, string workerCode,
+        TimeSpan? leaseDuration = null, CancellationToken cancellationToken = default)
+    {
+        var duration = leaseDuration ?? DefaultAttemptLease;
+        if (duration <= TimeSpan.Zero || duration > TimeSpan.FromMinutes(30))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_INVALID", "Attempt lease must be positive and no longer than 30 minutes.");
+        var attempt = await dbContext.OperationAttempts.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == attemptId, cancellationToken)
+            ?? throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.NOT_FOUND", "Operation attempt was not found.");
+        var now = timeProvider.GetUtcNow();
+        if (attempt.Status != OperationAttemptStatuses.Running || attempt.LeaseToken != leaseToken
+            || attempt.LeaseOwner != NormalizeCode(workerCode, 100, "worker code")
+            || attempt.LeaseExpiresAtUtc <= now)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_LOST", "Attempt lease is expired or owned by another worker.");
+        attempt.LastLeaseHeartbeatAtUtc = now;
+        attempt.LeaseExpiresAtUtc = now.Add(duration);
+        attempt.Version++;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return attempt;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_LOST", "Attempt lease was concurrently changed.");
+        }
+    }
+
     public async Task<OperationAttempt> CompleteAttemptAsync(
-        Guid tenantId, Guid attemptId, bool succeeded, string? safeErrorCode = null,
+        Guid tenantId, Guid attemptId, Guid leaseToken, bool succeeded, string? safeErrorCode = null,
         string safeDetailJson = "{}", CancellationToken cancellationToken = default)
     {
         var attempt = await dbContext.OperationAttempts.SingleOrDefaultAsync(
@@ -216,6 +413,9 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
             ?? throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.NOT_FOUND", "Operation attempt was not found.");
         if (attempt.Status != OperationAttemptStatuses.Running)
             throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.TERMINAL", "Completed attempts cannot transition again.");
+        if (attempt.LeaseToken != leaseToken || attempt.LeaseExpiresAtUtc <= timeProvider.GetUtcNow())
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_LOST", "Attempt lease is expired or owned by another worker.");
         attempt.Status = succeeded ? OperationAttemptStatuses.Succeeded : OperationAttemptStatuses.Failed;
         attempt.CompletedAtUtc = timeProvider.GetUtcNow();
         attempt.SafeErrorCode = Optional(safeErrorCode, 120, "safe error code");
@@ -229,6 +429,93 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         catch (DbUpdateConcurrencyException)
         {
             throw new DurableOperationRuleException("OPERATIONS.ATTEMPT.VERSION_CONFLICT", "Attempt was concurrently completed.");
+        }
+    }
+
+    public async Task<Operation> CompleteReplaySuccessAsync(
+        Guid tenantId,
+        Guid operationId,
+        Guid attemptId,
+        Guid leaseToken,
+        string? resultReferenceType,
+        Guid? resultReferenceId,
+        string safeDetailJson,
+        CancellationToken cancellationToken = default)
+    {
+        dbContext.ChangeTracker.Clear();
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        var operation = await dbContext.Operations.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == operationId, cancellationToken)
+            ?? throw new DurableOperationRuleException("OPERATIONS.NOT_FOUND", "Operation was not found.");
+        if (operation.Status == OperationStatuses.CancelRequested)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.CANCELLATION.PENDING", "Persisted cancellation must be observed before completion.");
+        if (operation.Status != OperationStatuses.Running)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.REPLAY.NOT_EXECUTABLE", "Only a running replay operation can complete.");
+        var attempt = await dbContext.OperationAttempts.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == attemptId && x.OperationId == operationId, cancellationToken)
+            ?? throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.NOT_FOUND", "Operation attempt was not found.");
+        if (attempt.Status != OperationAttemptStatuses.Running || attempt.LeaseToken != leaseToken
+            || attempt.LeaseExpiresAtUtc <= timeProvider.GetUtcNow())
+            throw new DurableOperationRuleException(
+                "OPERATIONS.ATTEMPT.LEASE_LOST", "Attempt lease is expired or owned by another worker.");
+        var failure = await dbContext.ProcessingFailures.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.CurrentOperationId == operationId, cancellationToken)
+            ?? throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
+        EnsureReplayEligible(failure);
+        EnsureOperationMatchesFailure(operation, failure);
+
+        var normalizedDetail = SafeDetailPolicy.Normalize(safeDetailJson);
+        var now = timeProvider.GetUtcNow();
+        attempt.Status = OperationAttemptStatuses.Succeeded;
+        attempt.CompletedAtUtc = now;
+        attempt.SafeErrorCode = null;
+        attempt.SafeDetailJson = normalizedDetail;
+        attempt.Version++;
+        operation.Status = OperationStatuses.Succeeded;
+        operation.CompletedAtUtc = now;
+        operation.ResultReferenceType = Optional(resultReferenceType, 100, "result reference type");
+        operation.ResultReferenceId = resultReferenceId;
+        operation.SafeErrorCode = null;
+        operation.SafeDetailJson = normalizedDetail;
+        operation.Version++;
+        failure.State = ProcessingFailureStates.Recovered;
+        failure.Replayable = false;
+        failure.CurrentOperationId = null;
+        failure.RecoveryOperationId = operation.Id;
+        failure.SafeErrorCode = "OPERATIONS.REPLAY.RECOVERED";
+        failure.SafeDetailJson = normalizedDetail;
+        failure.Version++;
+        var nextSequence = (await dbContext.OperationCheckpoints
+            .Where(x => x.TenantId == tenantId && x.OperationId == operationId)
+            .MaxAsync(x => (int?)x.Sequence, cancellationToken) ?? 0) + 1;
+        dbContext.OperationCheckpoints.Add(new OperationCheckpoint
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, OperationId = operationId,
+            Sequence = nextSequence, CheckpointKey = "OWNER_SUCCEEDED", ProgressPercentage = 100,
+            SafeDetailJson = normalizedDetail, OccurredAtUtc = now
+        });
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return operation;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            dbContext.ChangeTracker.Clear();
+            var current = await dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
+                x => x.TenantId == tenantId && x.Id == operationId, CancellationToken.None);
+            if (current?.Status == OperationStatuses.CancelRequested)
+                throw new DurableOperationRuleException(
+                    "OPERATIONS.CANCELLATION.PENDING", "Persisted cancellation won the completion race.");
+            throw new DurableOperationRuleException(
+                "OPERATIONS.REPLAY.COMPLETION_CONFLICT", "Replay completion was concurrently changed.");
         }
     }
 
@@ -284,6 +571,9 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         WorkerHeartbeatUpdate update, CancellationToken cancellationToken = default)
     {
         ValidateTenant(update.TenantId);
+        if (update.ObservationId == Guid.Empty || update.ObservationSequence <= 0)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.HEARTBEAT.OBSERVATION_INVALID", "Heartbeat observation identity and positive sequence are required.");
         if (update.PendingCount < 0 || update.RetryPendingCount < 0 || update.TerminalFailureCount < 0)
             throw new DurableOperationRuleException("OPERATIONS.HEARTBEAT.COUNT_INVALID", "Heartbeat counts cannot be negative.");
         var workerCode = NormalizeCode(update.WorkerCode, 100, "worker code");
@@ -291,27 +581,39 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         var updatedAt = timeProvider.GetUtcNow();
         var rows = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO operations.worker_heartbeats
-              ("Id","TenantId","WorkerCode","LastIterationStartedAtUtc","LastSucceededAtUtc","LastFailedAtUtc",
+              ("Id","TenantId","WorkerCode","ObservationId","ObservationSequence","LastIterationStartedAtUtc","LastSucceededAtUtc","LastFailedAtUtc",
                "CurrentOrLastSourceId","PendingCount","RetryPendingCount","TerminalFailureCount","OldestPendingAtUtc",
                "LastSafeErrorCode","UpdatedAtUtc")
             VALUES
-              ({Guid.NewGuid()},{update.TenantId},{workerCode},{update.LastIterationStartedAtUtc},{update.LastSucceededAtUtc},
+              ({Guid.NewGuid()},{update.TenantId},{workerCode},{update.ObservationId},{update.ObservationSequence},{update.LastIterationStartedAtUtc},{update.LastSucceededAtUtc},
                {update.LastFailedAtUtc},{update.CurrentOrLastSourceId},{update.PendingCount},{update.RetryPendingCount},
                {update.TerminalFailureCount},{update.OldestPendingAtUtc},{safeErrorCode},{updatedAt})
             ON CONFLICT ("TenantId","WorkerCode") DO UPDATE SET
+              "ObservationId"=EXCLUDED."ObservationId", "ObservationSequence"=EXCLUDED."ObservationSequence",
               "LastIterationStartedAtUtc"=EXCLUDED."LastIterationStartedAtUtc",
               "LastSucceededAtUtc"=EXCLUDED."LastSucceededAtUtc", "LastFailedAtUtc"=EXCLUDED."LastFailedAtUtc",
               "CurrentOrLastSourceId"=EXCLUDED."CurrentOrLastSourceId", "PendingCount"=EXCLUDED."PendingCount",
               "RetryPendingCount"=EXCLUDED."RetryPendingCount", "TerminalFailureCount"=EXCLUDED."TerminalFailureCount",
               "OldestPendingAtUtc"=EXCLUDED."OldestPendingAtUtc", "LastSafeErrorCode"=EXCLUDED."LastSafeErrorCode",
               "UpdatedAtUtc"=EXCLUDED."UpdatedAtUtc"
-            WHERE EXCLUDED."LastIterationStartedAtUtc" > operations.worker_heartbeats."LastIterationStartedAtUtc";
+            WHERE EXCLUDED."ObservationId" <> operations.worker_heartbeats."ObservationId"
+              AND (EXCLUDED."LastIterationStartedAtUtc" > operations.worker_heartbeats."LastIterationStartedAtUtc"
+               OR (EXCLUDED."LastIterationStartedAtUtc" = operations.worker_heartbeats."LastIterationStartedAtUtc"
+                   AND EXCLUDED."ObservationSequence" > operations.worker_heartbeats."ObservationSequence"));
             """, cancellationToken);
-        if (rows == 0)
-            throw new DurableOperationRuleException("OPERATIONS.HEARTBEAT.STALE", "An older or duplicate heartbeat observation cannot replace newer state.");
         dbContext.ChangeTracker.Clear();
-        return await dbContext.WorkerHeartbeats.AsNoTracking().SingleAsync(
+        var persisted = await dbContext.WorkerHeartbeats.AsNoTracking().SingleAsync(
             x => x.TenantId == update.TenantId && x.WorkerCode == workerCode, cancellationToken);
+        if (rows != 0) return persisted;
+        if (HeartbeatEquivalent(persisted, update, workerCode, safeErrorCode)) return persisted;
+        if (persisted.ObservationId == update.ObservationId
+            || (persisted.LastIterationStartedAtUtc == update.LastIterationStartedAtUtc
+                && persisted.ObservationSequence == update.ObservationSequence))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.HEARTBEAT.OBSERVATION_CONFLICT",
+                "Heartbeat observation identity is already associated with different state.");
+        throw new DurableOperationRuleException(
+            "OPERATIONS.HEARTBEAT.STALE", "An older heartbeat observation cannot replace newer state.");
     }
 
     public async Task<ProcessingFailureProjection> RecordFailureAsync(
@@ -325,7 +627,8 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
                 ? await dbContext.ProcessingFailures.SingleOrDefaultAsync(
                     x => x.TenantId == update.TenantId && x.Id == failureId, cancellationToken)
                 : await dbContext.ProcessingFailures.SingleOrDefaultAsync(
-                    x => x.TenantId == update.TenantId && x.ProcessorCode == normalized.ProcessorCode
+                    x => x.TenantId == update.TenantId && x.OwnerModule == normalized.OwnerModule
+                         && x.ProcessorCode == normalized.ProcessorCode
                          && x.OriginalSourceEventId == update.OriginalSourceEventId, cancellationToken);
             if (update.FailureId is not null && failure is null)
                 throw new DurableOperationRuleException("OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
@@ -371,6 +674,83 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         throw new DurableOperationRuleException("OPERATIONS.FAILURE.CONCURRENCY_CONFLICT", "Failure projection could not be updated after bounded retries.");
     }
 
+    public async Task<ProcessingFailureProjection> TransitionFailureStateAsync(
+        Guid tenantId,
+        Guid failureId,
+        long expectedVersion,
+        string targetState,
+        Guid? recoveryOperationId,
+        string safeErrorCode,
+        string safeDetailJson,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedTarget = NormalizeCode(targetState, 24, "failure state");
+        if (normalizedTarget is not (ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.RECOVERY_TARGET_INVALID", "Only recovered or completed recovery transitions are supported.");
+        var failure = await dbContext.ProcessingFailures.SingleOrDefaultAsync(
+            x => x.TenantId == tenantId && x.Id == failureId, cancellationToken)
+            ?? throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
+        if (failure.Version != expectedVersion)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.VERSION_CONFLICT", "Processing failure version is stale.");
+        if (normalizedTarget == ProcessingFailureStates.Recovered)
+        {
+            if (!ProcessingFailureStates.IsReplayEligible(failure.State) || recoveryOperationId is null)
+                throw new DurableOperationRuleException(
+                    "OPERATIONS.FAILURE.STATE_TRANSITION_INVALID",
+                    $"Failure state {failure.State} cannot transition to {normalizedTarget}.");
+            var operation = await dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
+                x => x.TenantId == tenantId && x.Id == recoveryOperationId.Value, cancellationToken)
+                ?? throw new DurableOperationRuleException(
+                    "OPERATIONS.NOT_FOUND", "Operation was not found.");
+            EnsureOperationMatchesFailure(operation, failure);
+            if (operation.Status != OperationStatuses.Succeeded || failure.CurrentOperationId != operation.Id)
+                throw new DurableOperationRuleException(
+                    "OPERATIONS.FAILURE.RECOVERY_OPERATION_INVALID",
+                    "Recovery requires the linked successful replay operation.");
+            failure.RecoveryOperationId = operation.Id;
+        }
+        else
+        {
+            if (failure.State != ProcessingFailureStates.Recovered)
+                throw new DurableOperationRuleException(
+                    "OPERATIONS.FAILURE.STATE_TRANSITION_INVALID",
+                    $"Failure state {failure.State} cannot transition to {normalizedTarget}.");
+            if (recoveryOperationId is not null && recoveryOperationId != failure.RecoveryOperationId)
+                throw new DurableOperationRuleException(
+                    "OPERATIONS.FAILURE.RECOVERY_OPERATION_INVALID",
+                    "Completion cannot replace the successful recovery operation.");
+        }
+        failure.State = normalizedTarget;
+        failure.Replayable = false;
+        failure.CurrentOperationId = null;
+        failure.SafeErrorCode = Required(safeErrorCode, 120, "safe error code");
+        failure.SafeDetailJson = SafeDetailPolicy.Normalize(safeDetailJson);
+        failure.Version++;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return failure;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.VERSION_CONFLICT", "Processing failure was concurrently changed.");
+        }
+    }
+
+    public async Task<ProcessingFailureProjection> GetFailureForCurrentOperationAsync(
+        Guid tenantId, Guid operationId, CancellationToken cancellationToken = default)
+    {
+        dbContext.ChangeTracker.Clear();
+        return await dbContext.ProcessingFailures.AsNoTracking().SingleOrDefaultAsync(
+                   x => x.TenantId == tenantId && x.CurrentOperationId == operationId, cancellationToken)
+               ?? throw new DurableOperationRuleException(
+                   "OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
+    }
+
     public async Task LinkFailureToOperationAsync(
         Guid tenantId, Guid failureId, Guid operationId, CancellationToken cancellationToken = default)
     {
@@ -382,10 +762,9 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
                 x => x.TenantId == tenantId && x.Id == failureId, cancellationToken)
                 ?? throw new DurableOperationRuleException("OPERATIONS.FAILURE.NOT_FOUND", "Processing failure was not found.");
             EnsureOperationMatchesFailure(operation, failure);
-            if (!failure.Replayable || ProcessingFailureStates.IsTerminal(failure.State)
-                                    || ProcessingFailureClassifications.IsTerminalInvalid(failure.FailureClassification))
-                throw new DurableOperationRuleException("OPERATIONS.REPLAY.NOT_ALLOWED", "Persisted failure is terminal or non-replayable.");
+            EnsureReplayEligible(failure);
             if (failure.CurrentOperationId == operationId) return;
+            await EnsureNoActiveReplayAsync(failure, cancellationToken);
             failure.CurrentOperationId = operationId;
             failure.Version++;
             try
@@ -416,6 +795,41 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         => dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
             x => x.TenantId == tenantId && x.ReplayRequestKey == replayRequestKey, cancellationToken);
 
+    private async Task EnsureNoActiveReplayAsync(
+        ProcessingFailureProjection failure, CancellationToken cancellationToken)
+    {
+        if (failure.CurrentOperationId is not { } currentOperationId) return;
+        var current = await dbContext.Operations.AsNoTracking().SingleOrDefaultAsync(
+            x => x.TenantId == failure.TenantId && x.Id == currentOperationId, cancellationToken);
+        if (current?.Status is OperationStatuses.Queued
+            or OperationStatuses.Running or OperationStatuses.CancelRequested)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.REPLAY.ACTIVE_EXISTS", "An active replay operation already exists for this failure.");
+    }
+
+    private static void EnsureReplayEligible(ProcessingFailureProjection failure)
+    {
+        if (!failure.Replayable || !ProcessingFailureStates.IsReplayEligible(failure.State)
+                                || ProcessingFailureClassifications.IsTerminalInvalid(failure.FailureClassification))
+            throw new DurableOperationRuleException(
+                "OPERATIONS.REPLAY.NOT_ALLOWED", "Persisted failure is not replay eligible.");
+    }
+
+    private static bool HeartbeatEquivalent(
+        WorkerHeartbeat persisted, WorkerHeartbeatUpdate update, string workerCode, string? safeErrorCode)
+        => persisted.WorkerCode == workerCode
+           && persisted.ObservationId == update.ObservationId
+           && persisted.ObservationSequence == update.ObservationSequence
+           && persisted.LastIterationStartedAtUtc == update.LastIterationStartedAtUtc
+           && persisted.LastSucceededAtUtc == update.LastSucceededAtUtc
+           && persisted.LastFailedAtUtc == update.LastFailedAtUtc
+           && persisted.CurrentOrLastSourceId == update.CurrentOrLastSourceId
+           && persisted.PendingCount == update.PendingCount
+           && persisted.RetryPendingCount == update.RetryPendingCount
+           && persisted.TerminalFailureCount == update.TerminalFailureCount
+           && persisted.OldestPendingAtUtc == update.OldestPendingAtUtc
+           && persisted.LastSafeErrorCode == safeErrorCode;
+
     private async Task<NormalizedFailureUpdate> NormalizeFailureUpdateAsync(
         ProcessingFailureUpdate update, CancellationToken cancellationToken)
     {
@@ -430,9 +844,13 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
         var requestedState = NormalizeCode(update.State, 24, "failure state");
         if (!ProcessingFailureStateSet.Contains(requestedState))
             throw new DurableOperationRuleException("OPERATIONS.FAILURE.STATE_INVALID", "Processing failure state is not approved.");
+        if (requestedState is ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed)
+            throw new DurableOperationRuleException(
+                "OPERATIONS.FAILURE.OCCURRENCE_STATE_INVALID",
+                "Failure occurrence recording cannot perform recovery or completion transitions.");
         var terminalClassification = ProcessingFailureClassifications.IsTerminalInvalid(classification);
         var state = terminalClassification ? ProcessingFailureStates.TerminalRejected : requestedState;
-        var replayable = !terminalClassification && !ProcessingFailureStates.IsTerminal(state) && update.Replayable;
+        var replayable = !terminalClassification && ProcessingFailureStates.IsReplayEligible(state) && update.Replayable;
         var currentOperationId = replayable ? update.CurrentOperationId : null;
         var causationId = Optional(update.OriginalCausationId, 128, "original causation identifier");
         var correlationId = Required(update.CorrelationId, 64, "correlation identifier");
@@ -452,21 +870,17 @@ public sealed class DurableOperationService(DurableOperationsDbContext dbContext
     {
         if (current == ProcessingFailureStates.TerminalRejected)
             return target == ProcessingFailureStates.TerminalRejected && terminalClassification;
-        if (current == ProcessingFailureStates.Completed) return target == ProcessingFailureStates.Completed;
+        if (current is ProcessingFailureStates.Completed or ProcessingFailureStates.Recovered) return false;
         if (terminalClassification) return target == ProcessingFailureStates.TerminalRejected;
         if (target == ProcessingFailureStates.Pending) return current == ProcessingFailureStates.Pending;
-        if (current == ProcessingFailureStates.Recovered)
-            return target is ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed;
         return current switch
         {
             ProcessingFailureStates.Pending => true,
             ProcessingFailureStates.RetryPending => target is ProcessingFailureStates.RetryPending
-                or ProcessingFailureStates.BusinessFailed or ProcessingFailureStates.Stalled
-                or ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed,
-            ProcessingFailureStates.BusinessFailed => target is ProcessingFailureStates.BusinessFailed
-                or ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed,
+                or ProcessingFailureStates.BusinessFailed or ProcessingFailureStates.Stalled,
+            ProcessingFailureStates.BusinessFailed => target is ProcessingFailureStates.BusinessFailed,
             ProcessingFailureStates.Stalled => target is ProcessingFailureStates.Stalled
-                or ProcessingFailureStates.RetryPending or ProcessingFailureStates.Recovered or ProcessingFailureStates.Completed,
+                or ProcessingFailureStates.RetryPending,
             _ => false
         };
     }

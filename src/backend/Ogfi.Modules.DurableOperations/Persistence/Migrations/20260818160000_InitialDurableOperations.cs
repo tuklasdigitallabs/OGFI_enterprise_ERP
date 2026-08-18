@@ -59,6 +59,11 @@ public sealed class InitialDurableOperations : Migration
                 "AttemptNumber" integer NOT NULL,
                 "Status" varchar(20) NOT NULL,
                 "WorkerCode" varchar(100) NOT NULL,
+                "LeaseOwner" varchar(100) NOT NULL,
+                "LeaseToken" uuid NOT NULL,
+                "LeaseAcquiredAtUtc" timestamptz NOT NULL,
+                "LeaseExpiresAtUtc" timestamptz NOT NULL,
+                "LastLeaseHeartbeatAtUtc" timestamptz NOT NULL,
                 "StartedAtUtc" timestamptz NOT NULL,
                 "CompletedAtUtc" timestamptz NULL,
                 "SafeErrorCode" varchar(120) NULL,
@@ -71,8 +76,9 @@ public sealed class InitialDurableOperations : Migration
                 CONSTRAINT "FK_operation_attempts_operations_TenantId_OperationId"
                     FOREIGN KEY ("TenantId", "OperationId") REFERENCES operations.operations ("TenantId", "Id") ON DELETE CASCADE,
                 CONSTRAINT "CK_operation_attempt_number" CHECK ("AttemptNumber" > 0),
-                CONSTRAINT "CK_operation_attempt_status" CHECK ("Status" IN ('RUNNING','SUCCEEDED','FAILED')),
+                CONSTRAINT "CK_operation_attempt_status" CHECK ("Status" IN ('RUNNING','SUCCEEDED','FAILED','ABANDONED')),
                 CONSTRAINT "CK_operation_attempt_version" CHECK ("Version" > 0),
+                CONSTRAINT "CK_operation_attempt_lease" CHECK ("LeaseExpiresAtUtc" >= "LeaseAcquiredAtUtc" AND "LastLeaseHeartbeatAtUtc" >= "LeaseAcquiredAtUtc"),
                 CONSTRAINT "CK_operation_attempt_safe_detail_size" CHECK (octet_length("SafeDetailJson"::text) <= 8192)
             );
             CREATE UNIQUE INDEX "IX_operation_attempts_TenantId_OperationId_AttemptNumber"
@@ -103,6 +109,8 @@ public sealed class InitialDurableOperations : Migration
                 "Id" uuid PRIMARY KEY,
                 "TenantId" uuid NOT NULL,
                 "WorkerCode" varchar(100) NOT NULL,
+                "ObservationId" uuid NOT NULL,
+                "ObservationSequence" bigint NOT NULL,
                 "LastIterationStartedAtUtc" timestamptz NOT NULL,
                 "LastSucceededAtUtc" timestamptz NULL,
                 "LastFailedAtUtc" timestamptz NULL,
@@ -114,7 +122,8 @@ public sealed class InitialDurableOperations : Migration
                 "LastSafeErrorCode" varchar(120) NULL,
                 "UpdatedAtUtc" timestamptz NOT NULL,
                 CONSTRAINT "AK_worker_heartbeats_TenantId_Id" UNIQUE ("TenantId", "Id"),
-                CONSTRAINT "CK_worker_heartbeat_counts" CHECK ("PendingCount" >= 0 AND "RetryPendingCount" >= 0 AND "TerminalFailureCount" >= 0)
+                CONSTRAINT "CK_worker_heartbeat_counts" CHECK ("PendingCount" >= 0 AND "RetryPendingCount" >= 0 AND "TerminalFailureCount" >= 0),
+                CONSTRAINT "CK_worker_heartbeat_observation_sequence" CHECK ("ObservationSequence" > 0)
             );
             CREATE UNIQUE INDEX "IX_worker_heartbeats_TenantId_WorkerCode"
                 ON operations.worker_heartbeats ("TenantId", "WorkerCode");
@@ -141,23 +150,28 @@ public sealed class InitialDurableOperations : Migration
                 "SafeDetailJson" jsonb NOT NULL,
                 "Replayable" boolean NOT NULL,
                 "CurrentOperationId" uuid NULL,
+                "RecoveryOperationId" uuid NULL,
                 "State" varchar(24) NOT NULL,
                 "Version" bigint NOT NULL,
                 CONSTRAINT "AK_processing_failure_projections_TenantId_Id" UNIQUE ("TenantId", "Id"),
                 CONSTRAINT "FK_processing_failure_projections_operations_TenantId_CurrentOperationId"
                     FOREIGN KEY ("TenantId", "CurrentOperationId") REFERENCES operations.operations ("TenantId", "Id") ON DELETE NO ACTION,
+                CONSTRAINT "FK_processing_failure_projections_operations_TenantId_RecoveryOperationId"
+                    FOREIGN KEY ("TenantId", "RecoveryOperationId") REFERENCES operations.operations ("TenantId", "Id") ON DELETE NO ACTION,
                 CONSTRAINT "CK_processing_failure_attempts" CHECK ("AttemptCount" > 0),
                 CONSTRAINT "CK_processing_failure_state" CHECK ("State" IN ('PENDING','RETRY_PENDING','BUSINESS_FAILED','TERMINAL_REJECTED','STALLED','RECOVERED','COMPLETED')),
                 CONSTRAINT "CK_processing_failure_classification" CHECK ("FailureClassification" IN ('TRANSIENT','BUSINESS','FORGED_TENANT','MALFORMED_CONTRACT','AUTHORIZATION','SECURITY_TERMINAL')),
                 CONSTRAINT "CK_processing_failure_version" CHECK ("Version" > 0),
                 CONSTRAINT "CK_processing_failure_safe_detail_size" CHECK (octet_length("SafeDetailJson"::text) <= 8192)
             );
-            CREATE UNIQUE INDEX "IX_processing_failure_projections_TenantId_ProcessorCode_OriginalSourceEventId"
-                ON operations.processing_failure_projections ("TenantId", "ProcessorCode", "OriginalSourceEventId");
+            CREATE UNIQUE INDEX "IX_processing_failure_projections_TenantId_OwnerModule_ProcessorCode_OriginalSourceEventId"
+                ON operations.processing_failure_projections ("TenantId", "OwnerModule", "ProcessorCode", "OriginalSourceEventId");
             CREATE INDEX "IX_processing_failure_projections_TenantId_State_LastFailedAtUtc"
                 ON operations.processing_failure_projections ("TenantId", "State", "LastFailedAtUtc");
             CREATE INDEX "IX_processing_failure_projections_TenantId_CurrentOperationId"
                 ON operations.processing_failure_projections ("TenantId", "CurrentOperationId");
+            CREATE INDEX "IX_processing_failure_projections_TenantId_RecoveryOperationId"
+                ON operations.processing_failure_projections ("TenantId", "RecoveryOperationId");
 
             ALTER TABLE operations.operations ENABLE ROW LEVEL SECURITY;
             ALTER TABLE operations.operations FORCE ROW LEVEL SECURITY;
