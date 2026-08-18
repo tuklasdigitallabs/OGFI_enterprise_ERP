@@ -181,7 +181,7 @@ describe('Batch F application workspace', () => {
 
     await user.click(screen.getByRole('link', { name: 'Finance Journals' }))
     expect(await screen.findByText('JRN-20260818-TEST')).toBeTruthy()
-    expect(screen.getByText('1,800')).toBeTruthy()
+    expect(screen.getAllByText('1,800')).toHaveLength(2)
     await user.click(screen.getByRole('link', { name: 'Open' }))
     expect(await screen.findByText('Finance Journal Detail')).toBeTruthy()
     expect(screen.getByText(/Debit 1,800 · Credit 1,800/)).toBeTruthy()
