@@ -22,6 +22,9 @@ public sealed class ModuleBoundaryTests
         AssertNoBusinessModuleReferences(
             typeof(Ogfi.Modules.Workflow.Persistence.WorkflowDbContext).Assembly,
             "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Finance");
+        AssertNoBusinessModuleReferences(
+            typeof(Ogfi.Modules.Finance.Persistence.FinanceDbContext).Assembly,
+            "Ogfi.Modules.Foundation", "Ogfi.Modules.Catalog", "Ogfi.Modules.Inventory", "Ogfi.Modules.Procurement", "Ogfi.Modules.Workflow");
     }
 
     private static void AssertNoBusinessModuleReferences(System.Reflection.Assembly assembly, params string[] forbidden)
