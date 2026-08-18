@@ -11,5 +11,6 @@
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
     <ProjectReference Include="../../../src/backend/Ogfi.Modules.Workflow/Ogfi.Modules.Workflow.csproj" />
+    <ProjectReference Include="../../../src/backend/Ogfi.Modules.Finance/Ogfi.Modules.Finance.csproj" />
   </ItemGroup>
 </Project>
