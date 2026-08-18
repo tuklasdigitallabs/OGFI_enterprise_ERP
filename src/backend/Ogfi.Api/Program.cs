@@ -8,6 +8,8 @@ using Ogfi.BuildingBlocks.Multitenancy;
 using Ogfi.BuildingBlocks.Observability;
 using Ogfi.Modules.Catalog;
 using Ogfi.Modules.Catalog.Persistence;
+using Ogfi.Modules.Finance;
+using Ogfi.Modules.Finance.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Foundation.Security;
 using Ogfi.Modules.Inventory;
@@ -41,6 +43,8 @@ builder.Services.AddScoped<GoodsReceiptService>();
 builder.Services.AddScoped<GoodsReceiptPostedConsumer>();
 builder.Services.AddScoped<StockPositionRebuildService>();
 builder.Services.AddScoped<WorkflowApprovalService>();
+builder.Services.AddScoped<FinanceSetupService>();
+builder.Services.AddScoped<FinancePostingService>();
 builder.Services.AddSingleton(TimeProvider.System);
 var connectionString = builder.Configuration.GetConnectionString("Postgres") ?? "Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev";
 builder.Services.AddDbContext<FoundationDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
@@ -48,7 +52,14 @@ builder.Services.AddDbContext<CatalogDbContext>((sp, options) => options.UseNpgs
 builder.Services.AddDbContext<InventoryDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddDbContext<ProcurementDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddDbContext<WorkflowDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
-builder.Services.AddHealthChecks().AddDbContextCheck<FoundationDbContext>("foundation-db").AddDbContextCheck<CatalogDbContext>("catalog-db").AddDbContextCheck<InventoryDbContext>("inventory-db").AddDbContextCheck<ProcurementDbContext>("procurement-db").AddDbContextCheck<WorkflowDbContext>("workflow-db");
+builder.Services.AddDbContext<FinanceDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<FoundationDbContext>("foundation-db")
+    .AddDbContextCheck<CatalogDbContext>("catalog-db")
+    .AddDbContextCheck<InventoryDbContext>("inventory-db")
+    .AddDbContextCheck<ProcurementDbContext>("procurement-db")
+    .AddDbContextCheck<WorkflowDbContext>("workflow-db")
+    .AddDbContextCheck<FinanceDbContext>("finance-db");
 var app = builder.Build();
 app.UseExceptionHandler();
 app.Use(async (context, next) =>
@@ -84,8 +95,24 @@ app.Use(async (context, next) =>
 app.UseAuthentication(); app.UseMiddleware<TenantExecutionContextMiddleware>(); app.UseAuthorization();
 if (app.Environment.IsDevelopment()) app.MapOpenApi();
 app.MapHealthChecks("/health/live"); app.MapHealthChecks("/health/ready");
-app.MapGet("/api/system/info", () => Results.Ok(new { referenceImplementation = "RI-01", acceptedBaseline = "RI01-BL04", candidateBaseline = "RI01-BL05-CANDIDATE", architectureBaseline = "OGFI Master Approved Baseline v4.6 / G9.6 Implementation Architecture", activeBatch = "E", status = "IN_IMPLEMENTATION", metricsMeter = OgfiMetrics.MeterName }));
-app.MapFoundationContextEndpoints(); app.MapCatalogEndpoints(); app.MapInventorySetupEndpoints(); app.MapInventoryOperationsEndpoints(); app.MapProcurementEndpoints(); app.MapGoodsReceiptEndpoints(); app.MapWorkflowEndpoints();
+app.MapGet("/api/system/info", () => Results.Ok(new
+{
+    referenceImplementation = "RI-01",
+    acceptedBaseline = "RI01-BL05",
+    candidateBaseline = "RI01-BL06-CANDIDATE",
+    architectureBaseline = "OGFI Master Approved Baseline v4.8 / G9.7 Implementation Architecture",
+    activeBatch = "F",
+    status = "IN_IMPLEMENTATION",
+    metricsMeter = OgfiMetrics.MeterName
+}));
+app.MapFoundationContextEndpoints();
+app.MapCatalogEndpoints();
+app.MapInventorySetupEndpoints();
+app.MapInventoryOperationsEndpoints();
+app.MapProcurementEndpoints();
+app.MapGoodsReceiptEndpoints();
+app.MapWorkflowEndpoints();
+app.MapFinanceEndpoints();
 app.Run();
 
 static bool IsPostgresConcurrencyConflict(Exception exception)

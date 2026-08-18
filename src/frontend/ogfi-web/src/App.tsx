@@ -23,12 +23,17 @@ import {
 } from './pages/BatchCPages'
 import { ApprovalInboxPage, ApprovalTaskPage } from './pages/BatchDPages'
 import {
-  BatchEOverviewPage,
   GoodsReceiptDetailPage,
   GoodsReceiptsPage,
   InventoryMovementsPage,
   StockPositionsPage,
 } from './pages/BatchEPages'
+import {
+  BatchFOverviewPage,
+  FinanceJournalDetailPage,
+  FinanceJournalsPage,
+  FinanceSourcePostingsPage,
+} from './pages/BatchFPages'
 
 const navigation = [
   ['Overview', '/overview'],
@@ -40,6 +45,8 @@ const navigation = [
   ['Goods Receipts', '/goods-receipts'],
   ['Stock Positions', '/stock-positions'],
   ['Inventory Movements', '/inventory-movements'],
+  ['Finance Posting Status', '/finance/source-postings'],
+  ['Finance Journals', '/finance/journals'],
   ['Inventory Setup', '/inventory-setup'],
 ] as const
 
@@ -54,14 +61,14 @@ function ApplicationShell() {
               RI-01 · Procure-to-Stock-to-Finance reference implementation
             </Typography>
           </Box>
-          <Chip label="RI01-BL05 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
-          <Chip label="Batch E" size="small" color="secondary" />
+          <Chip label="RI01-BL06 Candidate" size="small" variant="outlined" sx={{ color: 'inherit', borderColor: 'currentColor' }} />
+          <Chip label="Batch F" size="small" color="secondary" />
         </Toolbar>
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 3 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ alignItems: 'flex-start' }}>
-          <Paper component="nav" variant="outlined" sx={{ width: { xs: '100%', md: 230 }, flexShrink: 0, overflow: 'hidden' }}>
+          <Paper component="nav" variant="outlined" sx={{ width: { xs: '100%', md: 250 }, flexShrink: 0, overflow: 'hidden' }}>
             <Box sx={{ p: 2 }}>
               <Typography variant="overline" color="text.secondary">Reference workspace</Typography>
               <Typography variant="body2">Server-authoritative business operations</Typography>
@@ -89,7 +96,7 @@ export function App() {
       <Routes>
         <Route element={<ApplicationShell />}>
           <Route index element={<Navigate to="/overview" replace />} />
-          <Route path="/overview" element={<BatchEOverviewPage />} />
+          <Route path="/overview" element={<BatchFOverviewPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/suppliers" element={<SuppliersPage />} />
           <Route path="/supplier-offers" element={<SupplierOffersPage />} />
@@ -101,6 +108,9 @@ export function App() {
           <Route path="/goods-receipts/:goodsReceiptId" element={<GoodsReceiptDetailPage />} />
           <Route path="/stock-positions" element={<StockPositionsPage />} />
           <Route path="/inventory-movements" element={<InventoryMovementsPage />} />
+          <Route path="/finance/source-postings" element={<FinanceSourcePostingsPage />} />
+          <Route path="/finance/journals" element={<FinanceJournalsPage />} />
+          <Route path="/finance/journals/:journalId" element={<FinanceJournalDetailPage />} />
           <Route path="/inventory-setup" element={<InventorySetupPage />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Route>

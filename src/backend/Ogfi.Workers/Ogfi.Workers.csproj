@@ -5,6 +5,7 @@
     <ProjectReference Include="../Ogfi.Modules.Inventory/Ogfi.Modules.Inventory.csproj" />
     <ProjectReference Include="../Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
     <ProjectReference Include="../Ogfi.Modules.Workflow/Ogfi.Modules.Workflow.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Finance/Ogfi.Modules.Finance.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
 </Project>

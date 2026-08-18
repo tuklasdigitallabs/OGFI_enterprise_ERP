@@ -144,7 +144,13 @@ jobs:
       - name: Generate controlled Reference Build Manifest
         run: |
           SOURCE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$SOURCE_BRANCH" == batch-e/* ]]; then
+          if [[ "$SOURCE_BRANCH" == batch-f/* ]]; then
+            BUILD_BASELINE="RI01-BL06-CANDIDATE"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.8 / G9.7 Implementation Architecture"
+            ACTIVE_BATCH="F"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260818100110_InventoryMovementTenantRls|Procurement:20260818120100_OutboxConsumerDeliveryRls|Workflow:20260818061100_WorkflowTenantRls|Finance:20260818130100_FinanceTenantRls"
+            ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement","Workflow","Finance"]'
+          elif [[ "$SOURCE_BRANCH" == batch-e/* ]]; then
             BUILD_BASELINE="RI01-BL05-CANDIDATE"
             ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.6 / G9.6 Implementation Architecture"
             ACTIVE_BATCH="E"
@@ -169,10 +175,10 @@ jobs:
             SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls"
             ENABLED_MODULES='["Foundation"]'
           else
-            BUILD_BASELINE="RI01-BL04"
-            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.5 / G9.5"
-            ACTIVE_BATCH="E"
-            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260817141501_InventoryTenantRls|Procurement:20260817142015_SupplierConcurrency|Workflow:20260818061100_WorkflowTenantRls"
+            BUILD_BASELINE="RI01-BL05"
+            ARCHITECTURE_BASELINE="OGFI Master Approved Baseline v4.7 / G9.6"
+            ACTIVE_BATCH="F"
+            SCHEMA_VERSION="Foundation:20260817132100_SecuritySpineRls|Catalog:20260817142008_CatalogItemConcurrency|Inventory:20260818100110_InventoryMovementTenantRls|Procurement:20260818100100_GoodsReceiptTenantRls|Workflow:20260818061100_WorkflowTenantRls"
             ENABLED_MODULES='["Foundation","Catalog","Inventory","Procurement","Workflow"]'
           fi
           cat > RI01-build-manifest.json <<EOF

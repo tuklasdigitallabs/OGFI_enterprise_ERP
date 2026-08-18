@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Ogfi.Modules.Catalog.Persistence;
+using Ogfi.Modules.Finance.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Inventory.Persistence;
 using Ogfi.Modules.Procurement.Persistence;
@@ -13,7 +14,8 @@ await MigrateAsync(new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbCon
 await MigrateAsync(new InventoryDbContext(new DbContextOptionsBuilder<InventoryDbContext>().UseNpgsql(connectionString).Options));
 await MigrateAsync(new ProcurementDbContext(new DbContextOptionsBuilder<ProcurementDbContext>().UseNpgsql(connectionString).Options));
 await MigrateAsync(new WorkflowDbContext(new DbContextOptionsBuilder<WorkflowDbContext>().UseNpgsql(connectionString).Options));
-Console.WriteLine("OGFI migrations complete for Foundation, Catalog, Inventory, Procurement and Workflow.");
+await MigrateAsync(new FinanceDbContext(new DbContextOptionsBuilder<FinanceDbContext>().UseNpgsql(connectionString).Options));
+Console.WriteLine("OGFI migrations complete for Foundation, Catalog, Inventory, Procurement, Workflow and Finance.");
 
 static async Task MigrateAsync(DbContext dbContext)
 {
