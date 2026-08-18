@@ -9,6 +9,7 @@
     <ProjectReference Include="../Ogfi.Modules.Procurement/Ogfi.Modules.Procurement.csproj" />
     <ProjectReference Include="../Ogfi.Modules.Workflow/Ogfi.Modules.Workflow.csproj" />
     <ProjectReference Include="../Ogfi.Modules.Finance/Ogfi.Modules.Finance.csproj" />
+    <ProjectReference Include="../Ogfi.Modules.Audit/Ogfi.Modules.Audit.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
   </ItemGroup>
 </Project>
