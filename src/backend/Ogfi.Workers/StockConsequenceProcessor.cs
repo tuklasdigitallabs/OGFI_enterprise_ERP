@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Ogfi.BuildingBlocks.Messaging.Contracts;
 using Ogfi.Modules.Inventory;
+using Ogfi.Modules.Inventory.Persistence;
 using Ogfi.Modules.Procurement.Persistence;
 
 namespace Ogfi.Workers;
@@ -20,6 +22,7 @@ public sealed class NoopStockConsequenceAttemptHook : IStockConsequenceAttemptHo
 
 public sealed class StockConsequenceProcessor(
     ProcurementDbContext procurementDb,
+    InventoryDbContext inventoryDb,
     GoodsReceiptPostedConsumer inventoryConsumer,
     IStockConsequenceAttemptHook attemptHook,
     TimeProvider timeProvider,
@@ -95,40 +98,81 @@ public sealed class StockConsequenceProcessor(
             .Take(50)
             .ToListAsync(cancellationToken);
 
-        foreach (var message in pending)
+        foreach (var initialMessage in pending)
         {
-            message.AttemptCount++;
-            try
+            var messageId = initialMessage.Id;
+            var message = initialMessage;
+
+            for (var transientRetry = 0; transientRetry < 3; transientRetry++)
             {
-                await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
-                var payload = DeserializeAndValidate(message.Id, tenantId, message.Payload);
-                await inventoryConsumer.ApplyAsync(payload, cancellationToken);
-                await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
-                message.LastError = null;
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
-            }
-            catch (InventoryRuleException ex)
-            {
-                message.LastError = ex.Code;
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
-            }
-            catch (JsonException ex)
-            {
-                message.LastError = "INVENTORY.EVENT.INVALID_JSON";
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                message.LastError = ex.GetType().Name;
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} remains pending for tenant {TenantId}", message.Id, tenantId);
+                message.AttemptCount++;
+                try
+                {
+                    await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
+                    var payload = DeserializeAndValidate(message.Id, tenantId, message.Payload);
+                    await inventoryConsumer.ApplyAsync(payload, cancellationToken);
+                    await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
+                    message.LastError = null;
+                    message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                    await procurementDb.SaveChangesAsync(cancellationToken);
+                    break;
+                }
+                catch (Exception ex) when (IsTransientSerializationConflict(ex) && transientRetry < 2)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Goods Receipt consequence {MessageId} hit a transient serialization conflict; bounded retry {RetryNumber} for tenant {TenantId}",
+                        messageId,
+                        transientRetry + 1,
+                        tenantId);
+
+                    inventoryDb.ChangeTracker.Clear();
+                    procurementDb.ChangeTracker.Clear();
+                    await Task.Delay(TimeSpan.FromMilliseconds(25 * (transientRetry + 1)), cancellationToken);
+                    message = await procurementDb.OutboxMessages.SingleAsync(
+                        x => x.TenantId == tenantId && x.Id == messageId,
+                        cancellationToken);
+                }
+                catch (InventoryRuleException ex)
+                {
+                    message.LastError = ex.Code;
+                    message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                    await procurementDb.SaveChangesAsync(cancellationToken);
+                    logger.LogWarning(ex, "Goods Receipt consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
+                    break;
+                }
+                catch (JsonException ex)
+                {
+                    message.LastError = "INVENTORY.EVENT.INVALID_JSON";
+                    message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                    await procurementDb.SaveChangesAsync(cancellationToken);
+                    logger.LogWarning(ex, "Goods Receipt consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
+                    break;
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    message.LastError = ex.GetType().Name;
+                    await procurementDb.SaveChangesAsync(cancellationToken);
+                    logger.LogWarning(ex, "Goods Receipt consequence {MessageId} remains pending for tenant {TenantId}", message.Id, tenantId);
+                    break;
+                }
             }
         }
+    }
+
+    private static bool IsTransientSerializationConflict(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException pg
+                && (pg.SqlState == PostgresErrorCodes.SerializationFailure
+                    || pg.SqlState == PostgresErrorCodes.DeadlockDetected))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static GoodsReceiptPostedV1 DeserializeAndValidate(Guid messageId, Guid tenantId, string payloadJson)
