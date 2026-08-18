@@ -21,12 +21,19 @@ public sealed class NoopStockConsequenceAttemptHook : IStockConsequenceAttemptHo
 public sealed class StockConsequenceProcessor(
     ProcurementDbContext procurementDb,
     GoodsReceiptPostedConsumer inventoryConsumer,
-    OutboxDeliveryStore deliveries,
     IStockConsequenceAttemptHook attemptHook,
-    ILogger<StockConsequenceProcessor> logger)
+    TimeProvider timeProvider,
+    ILogger<StockConsequenceProcessor> logger,
+    OutboxDeliveryStore? deliveries = null)
 {
     public async Task ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
     {
+        if (deliveries is null)
+        {
+            await ProcessLegacySingleConsumerAsync(tenantId, cancellationToken);
+            return;
+        }
+
         var messages = await procurementDb.OutboxMessages.AsNoTracking()
             .Where(x => x.TenantId == tenantId
                         && x.Type == "Procurement.GoodsReceiptPosted"
@@ -49,13 +56,7 @@ public sealed class StockConsequenceProcessor(
             try
             {
                 await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
-                var payload = JsonSerializer.Deserialize<GoodsReceiptPostedV1>(message.Payload)
-                    ?? throw new InventoryRuleException("INVENTORY.EVENT.INVALID", "GoodsReceiptPosted payload is empty.");
-                if (payload.TenantId != tenantId || payload.EventId != message.Id)
-                {
-                    throw new InventoryRuleException("INVENTORY.EVENT.TENANT_MISMATCH", "GoodsReceiptPosted envelope identity does not match its payload.");
-                }
-
+                var payload = DeserializeAndValidate(message.Id, tenantId, message.Payload);
                 await inventoryConsumer.ApplyAsync(payload, cancellationToken);
                 await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
                 await deliveries.MarkCompletedAsync(tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
@@ -81,5 +82,63 @@ public sealed class StockConsequenceProcessor(
 
             await deliveries.TryFinalizeMessageAsync(tenantId, message.Id, cancellationToken);
         }
+    }
+
+    private async Task ProcessLegacySingleConsumerAsync(Guid tenantId, CancellationToken cancellationToken)
+    {
+        var pending = await procurementDb.OutboxMessages
+            .Where(x => x.TenantId == tenantId
+                        && x.ProcessedAtUtc == null
+                        && x.Type == "Procurement.GoodsReceiptPosted"
+                        && x.SchemaVersion == 1)
+            .OrderBy(x => x.OccurredAtUtc)
+            .Take(50)
+            .ToListAsync(cancellationToken);
+
+        foreach (var message in pending)
+        {
+            message.AttemptCount++;
+            try
+            {
+                await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
+                var payload = DeserializeAndValidate(message.Id, tenantId, message.Payload);
+                await inventoryConsumer.ApplyAsync(payload, cancellationToken);
+                await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
+                message.LastError = null;
+                message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                await procurementDb.SaveChangesAsync(cancellationToken);
+            }
+            catch (InventoryRuleException ex)
+            {
+                message.LastError = ex.Code;
+                message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                await procurementDb.SaveChangesAsync(cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
+            }
+            catch (JsonException ex)
+            {
+                message.LastError = "INVENTORY.EVENT.INVALID_JSON";
+                message.ProcessedAtUtc = timeProvider.GetUtcNow();
+                await procurementDb.SaveChangesAsync(cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                message.LastError = ex.GetType().Name;
+                await procurementDb.SaveChangesAsync(cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} remains pending for tenant {TenantId}", message.Id, tenantId);
+            }
+        }
+    }
+
+    private static GoodsReceiptPostedV1 DeserializeAndValidate(Guid messageId, Guid tenantId, string payloadJson)
+    {
+        var payload = JsonSerializer.Deserialize<GoodsReceiptPostedV1>(payloadJson)
+            ?? throw new InventoryRuleException("INVENTORY.EVENT.INVALID", "GoodsReceiptPosted payload is empty.");
+        if (payload.TenantId != tenantId || payload.EventId != messageId)
+        {
+            throw new InventoryRuleException("INVENTORY.EVENT.TENANT_MISMATCH", "GoodsReceiptPosted envelope identity does not match its payload.");
+        }
+        return payload;
     }
 }
