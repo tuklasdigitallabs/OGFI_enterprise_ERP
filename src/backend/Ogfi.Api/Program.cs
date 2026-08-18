@@ -57,20 +57,7 @@ app.Use(async (context, next) =>
     {
         await next();
     }
-    catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg
-        && (pg.SqlState == PostgresErrorCodes.SerializationFailure || pg.SqlState == PostgresErrorCodes.DeadlockDetected))
-    {
-        await Results.Problem(
-            statusCode: StatusCodes.Status409Conflict,
-            title: "OGFI concurrency conflict",
-            detail: "The operation conflicted with another committed transaction. Retry using the current resource state.",
-            extensions: new Dictionary<string, object?>
-            {
-                ["code"] = "CONCURRENCY.CONFLICT",
-                ["traceId"] = context.TraceIdentifier
-            }).ExecuteAsync(context);
-    }
-    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.SerializationFailure || ex.SqlState == PostgresErrorCodes.DeadlockDetected)
+    catch (Exception ex) when (IsPostgresConcurrencyConflict(ex))
     {
         await Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
@@ -100,4 +87,18 @@ app.MapHealthChecks("/health/live"); app.MapHealthChecks("/health/ready");
 app.MapGet("/api/system/info", () => Results.Ok(new { referenceImplementation = "RI-01", acceptedBaseline = "RI01-BL04", candidateBaseline = "RI01-BL05-CANDIDATE", architectureBaseline = "OGFI Master Approved Baseline v4.6 / G9.6 Implementation Architecture", activeBatch = "E", status = "IN_IMPLEMENTATION", metricsMeter = OgfiMetrics.MeterName }));
 app.MapFoundationContextEndpoints(); app.MapCatalogEndpoints(); app.MapInventorySetupEndpoints(); app.MapInventoryOperationsEndpoints(); app.MapProcurementEndpoints(); app.MapGoodsReceiptEndpoints(); app.MapWorkflowEndpoints();
 app.Run();
+
+static bool IsPostgresConcurrencyConflict(Exception exception)
+{
+    for (Exception? current = exception; current is not null; current = current.InnerException)
+    {
+        if (current is PostgresException pg
+            && (pg.SqlState == PostgresErrorCodes.SerializationFailure || pg.SqlState == PostgresErrorCodes.DeadlockDetected))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 public partial class Program;
