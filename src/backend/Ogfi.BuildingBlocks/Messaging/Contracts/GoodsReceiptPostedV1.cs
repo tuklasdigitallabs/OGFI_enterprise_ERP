@@ -1,0 +1,40 @@
+namespace Ogfi.BuildingBlocks.Messaging.Contracts;
+
+public sealed record GoodsReceiptPostedLineV1(
+    Guid GoodsReceiptLineId,
+    int LineNumber,
+    Guid PurchaseOrderLineId,
+    Guid CatalogItemId,
+    string CatalogItemCodeSnapshot,
+    string CatalogItemNameSnapshot,
+    decimal ReceivedQuantity,
+    Guid PurchaseUomId,
+    string PurchaseUomCodeSnapshot,
+    Guid BaseUomId,
+    string BaseUomCodeSnapshot,
+    long ConversionNumerator,
+    long ConversionDenominator,
+    decimal NormalizedBaseQuantity,
+    decimal UnitPrice,
+    decimal LineNetAmount);
+
+public sealed record GoodsReceiptPostedV1(
+    Guid EventId,
+    Guid TenantId,
+    Guid GoodsReceiptId,
+    string GoodsReceiptNumber,
+    Guid PurchaseOrderId,
+    string PurchaseOrderNumber,
+    Guid SupplierId,
+    string SupplierCodeSnapshot,
+    string SupplierNameSnapshot,
+    Guid LegalEntityId,
+    Guid OutletId,
+    Guid StockLocationId,
+    string StockLocationCodeSnapshot,
+    string Currency,
+    DateOnly BusinessDate,
+    Guid PostedByUserId,
+    string CorrelationId,
+    DateTimeOffset OccurredAtUtc,
+    IReadOnlyList<GoodsReceiptPostedLineV1> Lines);

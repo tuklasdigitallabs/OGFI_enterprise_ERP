@@ -4,6 +4,9 @@ public static class InventoryPermissionCodes
 {
     public const string SetupRead = "inventory.setup.read";
     public const string SetupWrite = "inventory.setup.write";
+    public const string StockRead = "inventory.stock.read";
+    public const string MovementRead = "inventory.movement.read";
+    public const string StockRebuild = "inventory.stock.rebuild";
 }
 
 public sealed class InventoryProfile

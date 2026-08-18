@@ -75,6 +75,227 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                     b.ToTable("outbox_messages", "procurement");
                 });
 
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceipt", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("BusinessDate")
+                        .HasColumnType("date");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<Guid>("LegalEntityId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<Guid>("OutletId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("PostedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("PostedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PurchaseOrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PurchaseOrderNumberSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("StockLocationCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("StockLocationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SupplierCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<Guid>("SupplierId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SupplierNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("TotalNetAmount")
+                        .HasPrecision(19, 4)
+                        .HasColumnType("numeric(19,4)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("TenantId", "Id");
+
+                    b.HasIndex("TenantId", "Number")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "PurchaseOrderId", "CreatedAtUtc");
+
+                    b.ToTable("goods_receipts", "procurement");
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceiptLine", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BaseUomCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<Guid>("BaseUomId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CatalogItemCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<Guid>("CatalogItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CatalogItemNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<long>("ConversionDenominator")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ConversionNumerator")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("GoodsReceiptId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("LineNetAmount")
+                        .HasPrecision(19, 4)
+                        .HasColumnType("numeric(19,4)");
+
+                    b.Property<int>("LineNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("NormalizedBaseQuantity")
+                        .HasPrecision(19, 6)
+                        .HasColumnType("numeric(19,6)");
+
+                    b.Property<Guid>("PurchaseOrderLineId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PurchaseUomCodeSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<Guid>("PurchaseUomId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("ReceivedQuantity")
+                        .HasPrecision(19, 6)
+                        .HasColumnType("numeric(19,6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("UnitPrice")
+                        .HasPrecision(19, 4)
+                        .HasColumnType("numeric(19,4)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "GoodsReceiptId", "LineNumber")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "PurchaseOrderLineId");
+
+                    b.ToTable("goods_receipt_lines", "procurement", t =>
+                        {
+                            t.HasCheckConstraint("CK_goods_receipt_line_conversion_denominator", "\"ConversionDenominator\" > 0");
+
+                            t.HasCheckConstraint("CK_goods_receipt_line_conversion_numerator", "\"ConversionNumerator\" > 0");
+
+                            t.HasCheckConstraint("CK_goods_receipt_line_normalized_quantity", "\"NormalizedBaseQuantity\" > 0");
+
+                            t.HasCheckConstraint("CK_goods_receipt_line_quantity", "\"ReceivedQuantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceiptPostingCommand", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("GoodsReceiptId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("ResultVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "GoodsReceiptId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("goods_receipt_posting_commands", "procurement");
+                });
+
             modelBuilder.Entity("Ogfi.Modules.Procurement.PurchaseOrder", b =>
                 {
                     b.Property<Guid>("Id")
@@ -143,6 +364,8 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasAlternateKey("TenantId", "Id");
+
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
 
@@ -206,6 +429,10 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                     b.Property<Guid>("PurchaseUomId")
                         .HasColumnType("uuid");
 
+                    b.Property<decimal>("ReceivedQuantity")
+                        .HasPrecision(19, 6)
+                        .HasColumnType("numeric(19,6)");
+
                     b.Property<Guid>("SupplierOfferId")
                         .HasColumnType("uuid");
 
@@ -218,6 +445,8 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasAlternateKey("TenantId", "Id");
+
                     b.HasIndex("TenantId", "PurchaseOrderId", "LineNumber")
                         .IsUnique();
 
@@ -228,6 +457,8 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                             t.HasCheckConstraint("CK_purchase_order_line_conversion_numerator", "\"ConversionNumerator\" > 0");
 
                             t.HasCheckConstraint("CK_purchase_order_line_quantity", "\"OrderQuantity\" > 0");
+
+                            t.HasCheckConstraint("CK_purchase_order_line_received_quantity", "\"ReceivedQuantity\" >= 0 AND \"ReceivedQuantity\" <= \"OrderQuantity\"");
                         });
                 });
 
@@ -260,6 +491,8 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                         .HasColumnType("bigint");
 
                     b.HasKey("Id");
+
+                    b.HasAlternateKey("TenantId", "Id");
 
                     b.HasIndex("TenantId", "Code")
                         .IsUnique();
@@ -350,6 +583,43 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceipt", b =>
+                {
+                    b.HasOne("Ogfi.Modules.Procurement.PurchaseOrder", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "PurchaseOrderId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceiptLine", b =>
+                {
+                    b.HasOne("Ogfi.Modules.Procurement.GoodsReceipt", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("TenantId", "GoodsReceiptId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Ogfi.Modules.Procurement.PurchaseOrderLine", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "PurchaseOrderLineId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceiptPostingCommand", b =>
+                {
+                    b.HasOne("Ogfi.Modules.Procurement.GoodsReceipt", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "GoodsReceiptId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Ogfi.Modules.Procurement.PurchaseOrder", b =>
                 {
                     b.HasOne("Ogfi.Modules.Procurement.Supplier", null)
@@ -378,6 +648,11 @@ namespace Ogfi.Modules.Procurement.Persistence.Migrations
                         .HasPrincipalKey("TenantId", "Id")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("Ogfi.Modules.Procurement.GoodsReceipt", b =>
+                {
+                    b.Navigation("Lines");
                 });
 
             modelBuilder.Entity("Ogfi.Modules.Procurement.PurchaseOrder", b =>
