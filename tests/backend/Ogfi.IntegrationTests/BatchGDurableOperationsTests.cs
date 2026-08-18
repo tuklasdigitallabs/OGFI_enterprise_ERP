@@ -10,8 +10,8 @@ using Xunit;
 
 namespace Ogfi.IntegrationTests;
 
+[Collection(BatchGOperationsTestCollection.Name)]
 public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture fixture)
-    : IClassFixture<BatchGDurableOperationsFixture>
 {
     [Fact]
     public async Task Operation_lifecycle_accepts_only_approved_forward_transitions()
@@ -757,6 +757,12 @@ public sealed class BatchGDurableOperationsTests(BatchGDurableOperationsFixture 
         try { return new(await operation, null); }
         catch (DurableOperationRuleException exception) { return new(null, exception); }
     }
+}
+
+[CollectionDefinition(Name)]
+public sealed class BatchGOperationsTestCollection : ICollectionFixture<BatchGDurableOperationsFixture>
+{
+    public const string Name = "Batch G operations shared database fixture";
 }
 
 public sealed class BatchGDurableOperationsFixture : IAsyncLifetime
