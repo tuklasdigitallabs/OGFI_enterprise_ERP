@@ -12,6 +12,8 @@ using Ogfi.Modules.Finance;
 using Ogfi.Modules.Finance.Persistence;
 using Ogfi.Modules.Audit;
 using Ogfi.Modules.Audit.Persistence;
+using Ogfi.Modules.DurableOperations;
+using Ogfi.Modules.DurableOperations.Persistence;
 using Ogfi.Modules.Foundation.Persistence;
 using Ogfi.Modules.Foundation.Security;
 using Ogfi.Modules.Inventory;
@@ -50,6 +52,8 @@ builder.Services.AddScoped<FinancePostingService>();
 builder.Services.AddScoped<AuditIngestionService>();
 builder.Services.AddScoped<AuditQueryService>();
 builder.Services.AddScoped<Rs01TraceProjectionService>();
+builder.Services.AddScoped<DurableOperationService>();
+builder.Services.AddScoped<ReplayCoordinator>();
 builder.Services.AddSingleton(TimeProvider.System);
 var connectionString = builder.Configuration.GetConnectionString("Postgres") ?? "Host=localhost;Port=5432;Database=ogfi;Username=ogfi;Password=ogfi_dev";
 builder.Services.AddDbContext<FoundationDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
@@ -59,6 +63,7 @@ builder.Services.AddDbContext<ProcurementDbContext>((sp, options) => options.Use
 builder.Services.AddDbContext<WorkflowDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddDbContext<FinanceDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddDbContext<AuditDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
+builder.Services.AddDbContext<DurableOperationsDbContext>((sp, options) => options.UseNpgsql(connectionString).AddInterceptors(sp.GetRequiredService<TenantSessionConnectionInterceptor>()));
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<FoundationDbContext>("foundation-db")
     .AddDbContextCheck<CatalogDbContext>("catalog-db")
@@ -66,7 +71,8 @@ builder.Services.AddHealthChecks()
     .AddDbContextCheck<ProcurementDbContext>("procurement-db")
     .AddDbContextCheck<WorkflowDbContext>("workflow-db")
     .AddDbContextCheck<FinanceDbContext>("finance-db")
-    .AddDbContextCheck<AuditDbContext>("audit-db");
+    .AddDbContextCheck<AuditDbContext>("audit-db")
+    .AddDbContextCheck<DurableOperationsDbContext>("durable-operations-db");
 var app = builder.Build();
 app.UseExceptionHandler();
 app.Use(async (context, next) =>
