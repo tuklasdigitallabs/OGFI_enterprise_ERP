@@ -13,6 +13,21 @@ public static class Rs01TraceStates
     public const string Invalid = "INVALID";
 }
 
+public static class Rs01MaterialStages
+{
+    public const string PurchaseOrderSubmission = "PURCHASE_ORDER.SUBMITTED";
+    public const string WorkflowApprovalDecision = "WORKFLOW.APPROVAL_DECIDED";
+    public const string ProcurementApprovalApplication = "PURCHASE_ORDER.APPROVAL_APPLIED";
+    public const string GoodsReceiptPosting = "GOODS_RECEIPT.POSTED";
+    public const string InventoryMovementCreation = "INVENTORY.MOVEMENT.CREATED";
+    public const string FinanceJournalPosting = "FINANCE.JOURNAL.POSTED";
+
+    public const string ProcurementOwner = "PROCUREMENT";
+    public const string WorkflowOwner = "WORKFLOW";
+    public const string InventoryOwner = "INVENTORY";
+    public const string FinanceOwner = "FINANCE";
+}
+
 public sealed class Rs01TraceProjection
 {
     public Guid Id { get; set; }
@@ -39,6 +54,21 @@ public sealed class Rs01TraceProjection
 public sealed class Rs01TraceProjectionService(AuditDbContext dbContext, TimeProvider timeProvider)
 {
     private const int MaximumEventsPerPurchaseOrder = 5_000;
+    private static readonly StageRequirement[] RequiredStages =
+    [
+        new("PURCHASE_ORDER_SUBMISSION", Rs01MaterialStages.ProcurementOwner, Rs01MaterialStages.PurchaseOrderSubmission,
+            x => x.PurchaseOrderId is not null),
+        new("WORKFLOW_APPROVAL_DECISION", Rs01MaterialStages.WorkflowOwner, Rs01MaterialStages.WorkflowApprovalDecision,
+            x => x.WorkflowInstanceId is not null && x.ApprovalTaskId is not null && x.ApprovalDecisionId is not null),
+        new("PROCUREMENT_APPROVAL_APPLICATION", Rs01MaterialStages.ProcurementOwner, Rs01MaterialStages.ProcurementApprovalApplication,
+            x => x.ApprovalDecisionId is not null),
+        new("GOODS_RECEIPT_POSTING", Rs01MaterialStages.ProcurementOwner, Rs01MaterialStages.GoodsReceiptPosting,
+            x => x.GoodsReceiptId is not null),
+        new("INVENTORY_MOVEMENT_CREATION", Rs01MaterialStages.InventoryOwner, Rs01MaterialStages.InventoryMovementCreation,
+            x => x.GoodsReceiptId is not null && x.InventoryMovementId is not null),
+        new("FINANCE_JOURNAL_POSTING", Rs01MaterialStages.FinanceOwner, Rs01MaterialStages.FinanceJournalPosting,
+            x => x.GoodsReceiptId is not null && x.FinanceSourcePostingId is not null && x.JournalId is not null)
+    ];
 
     public async Task<IReadOnlyList<Rs01TraceProjection>> RebuildAsync(
         Guid tenantId,
@@ -56,10 +86,15 @@ public sealed class Rs01TraceProjectionService(AuditDbContext dbContext, TimePro
         if (events.Count > MaximumEventsPerPurchaseOrder)
             throw new AuditRuleException("AUDIT.TRACE.EVIDENCE_LIMIT", "The trace exceeds the bounded evidence rebuild limit.");
 
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         await dbContext.Rs01TraceProjections
             .Where(x => x.TenantId == tenantId && x.PurchaseOrderId == purchaseOrderId)
             .ExecuteDeleteAsync(cancellationToken);
-        if (events.Count == 0) return [];
+        if (events.Count == 0)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return [];
+        }
 
         var receiptIds = events.Where(x => x.GoodsReceiptId != null).Select(x => x.GoodsReceiptId!.Value).Distinct().ToArray();
         Guid?[] traceReceipts = receiptIds.Length == 0 ? [null] : receiptIds.Select(x => (Guid?)x).ToArray();
@@ -78,13 +113,7 @@ public sealed class Rs01TraceProjectionService(AuditDbContext dbContext, TimePro
             var movementIds = evidence.Where(x => x.InventoryMovementId != null)
                 .Select(x => x.InventoryMovementId!.Value).Distinct().Order().ToArray();
             var missing = new List<string>();
-            if (workflowInstanceId is null) missing.Add("WORKFLOW_INSTANCE");
-            if (approvalTaskId is null) missing.Add("APPROVAL_TASK");
-            if (approvalDecisionId is null) missing.Add("APPROVAL_DECISION");
-            if (receiptId is null) missing.Add("GOODS_RECEIPT");
-            if (movementIds.Length == 0) missing.Add("INVENTORY_MOVEMENT");
-            if (financeSourcePostingId is null) missing.Add("FINANCE_SOURCE_POSTING");
-            if (journalId is null) missing.Add("JOURNAL");
+            ValidateMaterialStages(evidence, missing, contradictions);
 
             var state = contradictions.Count > 0
                 ? Rs01TraceStates.Invalid
@@ -118,7 +147,45 @@ public sealed class Rs01TraceProjectionService(AuditDbContext dbContext, TimePro
 
         dbContext.Rs01TraceProjections.AddRange(projections);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return projections;
+    }
+
+    private static void ValidateMaterialStages(
+        IReadOnlyCollection<AuditEvent> evidence,
+        ICollection<string> missing,
+        ICollection<string> contradictions)
+    {
+        foreach (var requirement in RequiredStages)
+        {
+            var actionEvidence = evidence
+                .Where(x => string.Equals(x.Action, requirement.Action, StringComparison.Ordinal))
+                .ToArray();
+            if (actionEvidence.Any(x => !string.Equals(x.SourceModule, requirement.Owner, StringComparison.Ordinal)))
+            {
+                contradictions.Add($"{requirement.Name} evidence was recorded by a non-owning module.");
+            }
+
+            var ownerEvidence = actionEvidence
+                .Where(x => string.Equals(x.SourceModule, requirement.Owner, StringComparison.Ordinal))
+                .ToArray();
+            if (ownerEvidence.Any(x => !string.Equals(x.Outcome, AuditOutcomes.Succeeded, StringComparison.Ordinal)))
+            {
+                contradictions.Add($"{requirement.Name} contains a non-successful outcome.");
+            }
+
+            var successfulEvidence = ownerEvidence
+                .Where(x => string.Equals(x.Outcome, AuditOutcomes.Succeeded, StringComparison.Ordinal))
+                .ToArray();
+            if (successfulEvidence.Length == 0)
+            {
+                missing.Add(requirement.Name);
+            }
+            else if (successfulEvidence.Any(x => !requirement.HasRequiredLinks(x)))
+            {
+                contradictions.Add($"{requirement.Name} is missing its owner-specific links.");
+            }
+        }
     }
 
     private static Guid? SingleLink(
@@ -140,4 +207,10 @@ public sealed class Rs01TraceProjectionService(AuditDbContext dbContext, TimePro
         bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
         return new Guid(bytes);
     }
+
+    private sealed record StageRequirement(
+        string Name,
+        string Owner,
+        string Action,
+        Func<AuditEvent, bool> HasRequiredLinks);
 }

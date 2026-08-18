@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 using Ogfi.BuildingBlocks.Messaging.Contracts;
 using Ogfi.BuildingBlocks.Multitenancy;
@@ -12,7 +13,7 @@ namespace Ogfi.IntegrationTests;
 public sealed class BatchGAuditTests(BatchGAuditFixture fixture) : IClassFixture<BatchGAuditFixture>
 {
     [Fact]
-    public async Task Material_evidence_is_idempotent_bounded_secret_safe_and_append_only()
+    public async Task Material_evidence_is_idempotent_and_append_only()
     {
         var purchaseOrderId = Guid.NewGuid();
         var sourceEventId = Guid.NewGuid();
@@ -29,16 +30,115 @@ public sealed class BatchGAuditTests(BatchGAuditFixture fixture) : IClassFixture
             Assert.Equal(first.Id, replay.Id);
             Assert.Equal(1, await db.AuditEvents.CountAsync(x => x.SourceEventId == sourceEventId));
 
-            var unsafeMessage = fixture.CreateMessage(
-                Guid.NewGuid(),
-                sourceEventId: Guid.NewGuid(),
-                safeEvidenceJson: """{"accessToken":"must-not-persist"}""");
-            var exception = await Assert.ThrowsAsync<AuditRuleException>(() => service.IngestAsync(unsafeMessage));
-            Assert.Equal("AUDIT.EVIDENCE.SECRET_REJECTED", exception.Code);
         }
 
         var mutation = await Assert.ThrowsAsync<PostgresException>(() => fixture.AttemptAuditEventUpdateAsync(sourceEventId));
         Assert.Equal("55000", mutation.SqlState);
+    }
+
+    [Fact]
+    public async Task Equivalent_concurrent_delivery_returns_one_logical_event()
+    {
+        var purchaseOrderId = Guid.NewGuid();
+        var sourceEventId = Guid.NewGuid();
+        var firstMessage = fixture.CreateMessage(purchaseOrderId, sourceEventId, """{"status":"SUBMITTED"}""");
+        var secondMessage = firstMessage with { EventId = Guid.NewGuid() };
+        var barrier = new ConcurrentSaveBarrier(2);
+
+        await using var firstDb = fixture.CreateContext(BatchGAuditFixture.TenantA, barrier);
+        await using var secondDb = fixture.CreateContext(BatchGAuditFixture.TenantA, barrier);
+        var results = await Task.WhenAll(
+            new AuditIngestionService(firstDb, fixture.TimeProvider).IngestAsync(firstMessage),
+            new AuditIngestionService(secondDb, fixture.TimeProvider).IngestAsync(secondMessage));
+
+        Assert.Equal(results[0].Id, results[1].Id);
+        await using var verificationDb = fixture.CreateContext(BatchGAuditFixture.TenantA);
+        Assert.Equal(1, await verificationDb.AuditEvents.CountAsync(x => x.SourceEventId == sourceEventId));
+    }
+
+    [Fact]
+    public async Task Conflicting_concurrent_delivery_leaves_one_event_and_returns_stable_conflict()
+    {
+        var purchaseOrderId = Guid.NewGuid();
+        var sourceEventId = Guid.NewGuid();
+        var firstMessage = fixture.CreateMessage(
+            purchaseOrderId, sourceEventId, """{"status":"SUBMITTED"}""", resourceId: Guid.NewGuid());
+        var secondMessage = fixture.CreateMessage(
+            purchaseOrderId, sourceEventId, """{"status":"APPROVED"}""", resourceId: Guid.NewGuid());
+        var barrier = new ConcurrentSaveBarrier(2);
+
+        await using var firstDb = fixture.CreateContext(BatchGAuditFixture.TenantA, barrier);
+        await using var secondDb = fixture.CreateContext(BatchGAuditFixture.TenantA, barrier);
+        var outcomes = await Task.WhenAll(
+            CaptureAsync(new AuditIngestionService(firstDb, fixture.TimeProvider).IngestAsync(firstMessage)),
+            CaptureAsync(new AuditIngestionService(secondDb, fixture.TimeProvider).IngestAsync(secondMessage)));
+
+        Assert.Single(outcomes, x => x.Event is not null);
+        var conflict = Assert.Single(outcomes, x => x.Error is not null).Error!;
+        Assert.Equal("AUDIT.INGESTION.IDENTITY_CONFLICT", conflict.Code);
+        await using var verificationDb = fixture.CreateContext(BatchGAuditFixture.TenantA);
+        Assert.Equal(1, await verificationDb.AuditEvents.CountAsync(x => x.SourceEventId == sourceEventId));
+    }
+
+    public static TheoryData<string, string> RejectedEvidence => new()
+    {
+        { """{"authToken":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"accessToken":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"refreshToken":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"sessionCookie":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"passwordHash":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"clientSecret":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"apiKey":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"authorization":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"credential":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"jwt":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"bearerToken":"x"}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { """{"result":{"accessToken":"x"}}""", "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED" },
+        { $$"""{"status":"{{new string('x', 2_001)}}"}""", "AUDIT.EVIDENCE.TOO_LARGE" },
+        { $$"""{"status":"{{new string('x', 16_384)}}"}""", "AUDIT.EVIDENCE.TOO_LARGE" }
+    };
+
+    [Theory]
+    [MemberData(nameof(RejectedEvidence))]
+    public async Task Safe_evidence_rejects_non_allowlisted_and_oversized_content(string evidence, string expectedCode)
+    {
+        await using var db = fixture.CreateContext(BatchGAuditFixture.TenantA);
+        var message = fixture.CreateMessage(Guid.NewGuid(), Guid.NewGuid(), evidence);
+        var exception = await Assert.ThrowsAsync<AuditRuleException>(
+            () => new AuditIngestionService(db, fixture.TimeProvider).IngestAsync(message));
+        Assert.Equal(expectedCode, exception.Code);
+    }
+
+    [Theory]
+    [InlineData(AuditActorTypes.Human)]
+    [InlineData(AuditActorTypes.System)]
+    [InlineData(AuditActorTypes.Integration)]
+    public async Task Approved_actor_vocabulary_is_accepted(string actorType)
+    {
+        await fixture.IngestAsync(fixture.CreateMessage(
+            Guid.NewGuid(), Guid.NewGuid(), actorType: actorType));
+    }
+
+    [Fact]
+    public async Task Support_elevation_actor_is_reserved_until_controlled_action_exists()
+    {
+        await using var db = fixture.CreateContext(BatchGAuditFixture.TenantA);
+        var exception = await Assert.ThrowsAsync<AuditRuleException>(() =>
+            new AuditIngestionService(db, fixture.TimeProvider).IngestAsync(
+                fixture.CreateMessage(Guid.NewGuid(), Guid.NewGuid(), actorType: AuditActorTypes.SupportElevation)));
+        Assert.Equal("AUDIT.INGESTION.SUPPORT_ELEVATION_RESERVED", exception.Code);
+    }
+
+    [Theory]
+    [InlineData("USER")]
+    [InlineData("WORKER")]
+    public async Task Legacy_actor_vocabulary_is_rejected(string actorType)
+    {
+        await using var db = fixture.CreateContext(BatchGAuditFixture.TenantA);
+        var exception = await Assert.ThrowsAsync<AuditRuleException>(() =>
+            new AuditIngestionService(db, fixture.TimeProvider).IngestAsync(
+                fixture.CreateMessage(Guid.NewGuid(), Guid.NewGuid(), actorType: actorType)));
+        Assert.Equal("AUDIT.INGESTION.INVALID", exception.Code);
     }
 
     [Fact]
@@ -47,16 +147,26 @@ public sealed class BatchGAuditTests(BatchGAuditFixture fixture) : IClassFixture
         var completePo = Guid.NewGuid();
         var receipt = Guid.NewGuid();
         var journal = Guid.NewGuid();
-        await fixture.IngestAsync(fixture.CreateMessage(
-            completePo,
-            sourceEventId: Guid.NewGuid(),
-            goodsReceiptId: receipt,
-            workflowInstanceId: Guid.NewGuid(),
-            approvalTaskId: Guid.NewGuid(),
-            approvalDecisionId: Guid.NewGuid(),
-            inventoryMovementId: Guid.NewGuid(),
-            financeSourcePostingId: Guid.NewGuid(),
-            journalId: journal));
+        var workflowInstance = Guid.NewGuid();
+        var approvalTask = Guid.NewGuid();
+        var approvalDecision = Guid.NewGuid();
+        var movement = Guid.NewGuid();
+        var financeSource = Guid.NewGuid();
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"status":"SUBMITTED"}""",
+            action: Rs01MaterialStages.PurchaseOrderSubmission));
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"decision":"APPROVED"}""",
+            sourceModule: Rs01MaterialStages.WorkflowOwner, action: Rs01MaterialStages.WorkflowApprovalDecision,
+            workflowInstanceId: workflowInstance, approvalTaskId: approvalTask, approvalDecisionId: approvalDecision));
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"status":"APPROVED"}""",
+            action: Rs01MaterialStages.ProcurementApprovalApplication, approvalDecisionId: approvalDecision));
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"status":"POSTED"}""",
+            action: Rs01MaterialStages.GoodsReceiptPosting, goodsReceiptId: receipt));
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"movementType":"RECEIPT"}""",
+            sourceModule: Rs01MaterialStages.InventoryOwner, action: Rs01MaterialStages.InventoryMovementCreation,
+            goodsReceiptId: receipt, inventoryMovementId: movement));
+        await fixture.IngestAsync(fixture.CreateMessage(completePo, Guid.NewGuid(), """{"postingStatus":"POSTED"}""",
+            sourceModule: Rs01MaterialStages.FinanceOwner, action: Rs01MaterialStages.FinanceJournalPosting,
+            goodsReceiptId: receipt, financeSourcePostingId: financeSource, journalId: journal));
 
         await using (var db = fixture.CreateContext(BatchGAuditFixture.TenantA))
         {
@@ -77,33 +187,78 @@ public sealed class BatchGAuditTests(BatchGAuditFixture fixture) : IClassFixture
                 new AuditEventQuery(Limit: 101)));
         }
 
+        await using (var failingDb = fixture.CreateContext(BatchGAuditFixture.TenantA, new FailingSaveInterceptor()))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new Rs01TraceProjectionService(failingDb, fixture.TimeProvider)
+                    .RebuildAsync(BatchGAuditFixture.TenantA, completePo));
+        }
+        await using (var verificationDb = fixture.CreateContext(BatchGAuditFixture.TenantA))
+        {
+            var preserved = Assert.Single(await verificationDb.Rs01TraceProjections
+                .Where(x => x.PurchaseOrderId == completePo).ToListAsync());
+            Assert.Equal(Rs01TraceStates.Complete, preserved.State);
+        }
+
         var incompletePo = Guid.NewGuid();
-        await fixture.IngestAsync(fixture.CreateMessage(incompletePo, sourceEventId: Guid.NewGuid()));
+        await fixture.IngestAsync(fixture.CreateMessage(
+            incompletePo, Guid.NewGuid(), action: Rs01MaterialStages.PurchaseOrderSubmission,
+            workflowInstanceId: Guid.NewGuid(), approvalTaskId: Guid.NewGuid(), approvalDecisionId: Guid.NewGuid(),
+            goodsReceiptId: Guid.NewGuid(), inventoryMovementId: Guid.NewGuid(),
+            financeSourcePostingId: Guid.NewGuid(), journalId: Guid.NewGuid()));
         await using (var db = fixture.CreateContext(BatchGAuditFixture.TenantA))
         {
             var trace = Assert.Single(await new Rs01TraceProjectionService(db, fixture.TimeProvider)
                 .RebuildAsync(BatchGAuditFixture.TenantA, incompletePo));
             Assert.Equal(Rs01TraceStates.Incomplete, trace.State);
-            Assert.Contains("GOODS_RECEIPT", trace.MissingLinksJson);
+            Assert.Contains("GOODS_RECEIPT_POSTING", trace.MissingLinksJson);
+        }
+
+        var ownershipConflictPo = Guid.NewGuid();
+        await fixture.IngestAsync(fixture.CreateMessage(
+            ownershipConflictPo, Guid.NewGuid(), action: Rs01MaterialStages.PurchaseOrderSubmission));
+        await fixture.IngestAsync(fixture.CreateMessage(
+            ownershipConflictPo, Guid.NewGuid(), action: Rs01MaterialStages.WorkflowApprovalDecision,
+            sourceModule: Rs01MaterialStages.ProcurementOwner));
+        await fixture.IngestAsync(fixture.CreateMessage(
+            ownershipConflictPo, Guid.NewGuid(), action: Rs01MaterialStages.WorkflowApprovalDecision,
+            sourceModule: Rs01MaterialStages.WorkflowOwner, outcome: AuditOutcomes.Failed,
+            errorCode: "WORKFLOW.REJECTED"));
+        await using (var db = fixture.CreateContext(BatchGAuditFixture.TenantA))
+        {
+            var trace = Assert.Single(await new Rs01TraceProjectionService(db, fixture.TimeProvider)
+                .RebuildAsync(BatchGAuditFixture.TenantA, ownershipConflictPo));
+            Assert.Equal(Rs01TraceStates.Invalid, trace.State);
+            Assert.Contains("non-owning module", trace.InvalidReason);
+            Assert.Contains("non-successful outcome", trace.InvalidReason);
         }
 
         await fixture.IngestAsync(fixture.CreateMessage(
             completePo,
             sourceEventId: Guid.NewGuid(),
             goodsReceiptId: receipt,
-            workflowInstanceId: Guid.NewGuid(),
-            approvalTaskId: Guid.NewGuid(),
-            approvalDecisionId: Guid.NewGuid(),
-            inventoryMovementId: Guid.NewGuid(),
-            financeSourcePostingId: Guid.NewGuid(),
+            sourceModule: Rs01MaterialStages.FinanceOwner,
+            financeSourcePostingId: financeSource,
             journalId: Guid.NewGuid(),
-            action: "JOURNAL.CONTRADICTION.RECORDED"));
+            action: Rs01MaterialStages.FinanceJournalPosting));
         await using (var db = fixture.CreateContext(BatchGAuditFixture.TenantA))
         {
             var trace = Assert.Single(await new Rs01TraceProjectionService(db, fixture.TimeProvider)
                 .RebuildAsync(BatchGAuditFixture.TenantA, completePo));
             Assert.Equal(Rs01TraceStates.Invalid, trace.State);
             Assert.NotNull(trace.InvalidReason);
+        }
+    }
+
+    private static async Task<IngestionOutcome> CaptureAsync(Task<AuditEvent> operation)
+    {
+        try
+        {
+            return new(await operation, null);
+        }
+        catch (AuditRuleException exception)
+        {
+            return new(null, exception);
         }
     }
 
@@ -154,15 +309,14 @@ public sealed class BatchGAuditFixture : IAsyncLifetime
 
     public Task DisposeAsync() => Task.CompletedTask;
 
-    public AuditDbContext CreateContext(Guid tenantId)
+    public AuditDbContext CreateContext(Guid tenantId, params IInterceptor[] additionalInterceptors)
     {
         var executionContext = new TenantExecutionContextAccessor();
         executionContext.SetCandidateTenant(tenantId);
-        var options = new DbContextOptionsBuilder<AuditDbContext>()
-            .UseNpgsql(connectionString)
-            .AddInterceptors(new TenantSessionConnectionInterceptor(executionContext))
-            .Options;
-        return new AuditDbContext(options);
+        var options = new DbContextOptionsBuilder<AuditDbContext>().UseNpgsql(connectionString);
+        options.AddInterceptors(new TenantSessionConnectionInterceptor(executionContext));
+        options.AddInterceptors(additionalInterceptors);
+        return new AuditDbContext(options.Options);
     }
 
     public async Task IngestAsync(AuditMaterialActionRecordedV1 message)
@@ -182,11 +336,16 @@ public sealed class BatchGAuditFixture : IAsyncLifetime
         Guid? inventoryMovementId = null,
         Guid? financeSourcePostingId = null,
         Guid? journalId = null,
-        string action = "PURCHASE_ORDER.MATERIAL_ACTION")
+        string action = "PURCHASE_ORDER.MATERIAL_ACTION",
+        string sourceModule = Rs01MaterialStages.ProcurementOwner,
+        Guid? resourceId = null,
+        string actorType = AuditActorTypes.Integration,
+        string outcome = AuditOutcomes.Succeeded,
+        string? errorCode = null)
         => new(
-            Guid.NewGuid(), TenantA, AuditActorTypes.Worker, null, null, action, "PROCUREMENT",
-            "PURCHASE_ORDER", purchaseOrderId, 1, null, null, new DateOnly(2026, 8, 18),
-            TimeProvider.GetUtcNow(), AuditOutcomes.Succeeded, null, $"corr-{Guid.NewGuid():N}"[..32],
+            Guid.NewGuid(), TenantA, actorType, null, null, action, sourceModule,
+            "PURCHASE_ORDER", resourceId ?? purchaseOrderId, 1, null, null, new DateOnly(2026, 8, 18),
+            TimeProvider.GetUtcNow(), outcome, errorCode, $"corr-{Guid.NewGuid():N}"[..32],
             $"cause-{sourceEventId:N}", sourceEventId, safeEvidenceJson, purchaseOrderId,
             workflowInstanceId, approvalTaskId, approvalDecisionId, goodsReceiptId, inventoryMovementId,
             financeSourcePostingId, journalId);
@@ -226,7 +385,7 @@ public sealed class BatchGAuditFixture : IAsyncLifetime
         await using var command = new NpgsqlCommand("""
             insert into audit.audit_events
               ("Id","TenantId","ActorType","Action","SourceModule","ResourceType","ResourceId","OccurredAtUtc","Outcome","CorrelationId","SafeEvidenceJson","CreatedAtUtc")
-            values (@id,@tenant,'WORKER','FORGED.WRITE','TEST','PURCHASE_ORDER',@resource,@now,'REJECTED','forged','{}'::jsonb,@now);
+            values (@id,@tenant,'INTEGRATION','FORGED.WRITE','TEST','PURCHASE_ORDER',@resource,@now,'REJECTED','forged','{}'::jsonb,@now);
             """, connection);
         command.Parameters.AddWithValue("id", Guid.NewGuid());
         command.Parameters.AddWithValue("tenant", TenantB);
@@ -243,3 +402,31 @@ public sealed class BatchGAuditFixture : IAsyncLifetime
 }
 
 public sealed record AuditRlsState(string Table, bool Enabled, bool Forced, long PolicyCount);
+
+public sealed record IngestionOutcome(AuditEvent? Event, AuditRuleException? Error);
+
+public sealed class ConcurrentSaveBarrier(int participantCount) : SaveChangesInterceptor
+{
+    private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int arrivals;
+
+    public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Increment(ref arrivals) == participantCount) completion.TrySetResult();
+        await completion.Task.WaitAsync(cancellationToken);
+        return result;
+    }
+}
+
+public sealed class FailingSaveInterceptor : SaveChangesInterceptor
+{
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+        => ValueTask.FromException<InterceptionResult<int>>(
+            new InvalidOperationException("Injected projection save failure."));
+}

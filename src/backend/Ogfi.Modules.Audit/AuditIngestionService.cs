@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Ogfi.BuildingBlocks.Messaging.Contracts;
 using Ogfi.Modules.Audit.Persistence;
 
@@ -11,10 +12,10 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
 {
     private const int MaximumEvidenceBytes = 16_384;
     private const int MaximumEvidenceStringLength = 2_000;
-    private static readonly HashSet<string> ForbiddenEvidenceNames = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> AllowedEvidenceNames = new(StringComparer.Ordinal)
     {
-        "password", "passwd", "secret", "token", "accesstoken", "refreshtoken", "authorization",
-        "cookie", "setcookie", "clientsecret", "apikey", "privatekey"
+        "status", "linecount", "decision", "quantity", "movementtype", "postingstatus", "reasoncode",
+        "result", "items", "stage"
     };
 
     public async Task<AuditEvent> IngestAsync(
@@ -24,22 +25,12 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
         ValidateMessage(message);
         var safeEvidence = NormalizeSafeEvidence(message.SafeEvidenceJson);
 
-        if (message.SourceEventId is Guid sourceEventId)
+        if (message.SourceEventId is not null)
         {
-            var existing = await dbContext.AuditEvents.AsNoTracking().SingleOrDefaultAsync(
-                x => x.TenantId == message.TenantId
-                     && x.SourceModule == message.SourceModule.Trim().ToUpperInvariant()
-                     && x.SourceEventId == sourceEventId
-                     && x.Action == message.Action.Trim().ToUpperInvariant(),
-                cancellationToken);
+            var existing = await FindExistingAsync(message, cancellationToken);
             if (existing is not null)
             {
-                if (existing.ResourceId != message.ResourceId || !JsonEquivalent(existing.SafeEvidenceJson, safeEvidence))
-                {
-                    throw new AuditRuleException(
-                        "AUDIT.INGESTION.IDENTITY_CONFLICT",
-                        "The audit ingestion identity is already associated with different safe evidence.");
-                }
+                EnsureEquivalent(existing, message.ResourceId, safeEvidence);
                 return existing;
             }
         }
@@ -78,8 +69,21 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
         };
 
         dbContext.AuditEvents.Add(auditEvent);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return auditEvent;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return auditEvent;
+        }
+        catch (DbUpdateException exception) when (
+            message.SourceEventId is not null
+            && exception.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            dbContext.ChangeTracker.Clear();
+            var existing = await FindExistingAsync(message, cancellationToken);
+            if (existing is null) throw;
+            EnsureEquivalent(existing, message.ResourceId, safeEvidence);
+            return existing;
+        }
     }
 
     private static void ValidateMessage(AuditMaterialActionRecordedV1 message)
@@ -100,9 +104,15 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
         }
 
         var actorType = Required(message.ActorType, 20, "actor type").ToUpperInvariant();
-        if (actorType is not (AuditActorTypes.User or AuditActorTypes.Worker or AuditActorTypes.System))
+        if (actorType is not (AuditActorTypes.Human or AuditActorTypes.System or AuditActorTypes.Integration or AuditActorTypes.SupportElevation))
         {
             throw new AuditRuleException("AUDIT.INGESTION.INVALID", "Actor type is not supported.");
+        }
+        if (actorType == AuditActorTypes.SupportElevation)
+        {
+            throw new AuditRuleException(
+                "AUDIT.INGESTION.SUPPORT_ELEVATION_RESERVED",
+                "Support-elevation evidence is reserved until a controlled support action is implemented.");
         }
         var outcome = Required(message.Outcome, 20, "outcome").ToUpperInvariant();
         if (outcome is not (AuditOutcomes.Succeeded or AuditOutcomes.Failed or AuditOutcomes.Rejected))
@@ -137,7 +147,7 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
             {
                 throw new AuditRuleException("AUDIT.EVIDENCE.INVALID", "Safe evidence must be a JSON object.");
             }
-            ValidateElement(document.RootElement);
+            ValidateAllowedEvidence(document.RootElement);
             return JsonSerializer.Serialize(document.RootElement);
         }
         catch (JsonException ex)
@@ -146,22 +156,24 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
         }
     }
 
-    private static void ValidateElement(JsonElement element)
+    private static void ValidateAllowedEvidence(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in element.EnumerateObject())
             {
-                if (ForbiddenEvidenceNames.Contains(NormalizeEvidenceName(property.Name)))
+                if (!AllowedEvidenceNames.Contains(NormalizeEvidenceName(property.Name)))
                 {
-                    throw new AuditRuleException("AUDIT.EVIDENCE.SECRET_REJECTED", "Safe evidence contains a forbidden secret-bearing field.");
+                    throw new AuditRuleException(
+                        "AUDIT.EVIDENCE.FIELD_NOT_ALLOWED",
+                        $"Safe evidence field '{property.Name}' is not in the minimum-proof allow-list.");
                 }
-                ValidateElement(property.Value);
+                ValidateAllowedEvidence(property.Value);
             }
         }
         else if (element.ValueKind == JsonValueKind.Array)
         {
-            foreach (var item in element.EnumerateArray()) ValidateElement(item);
+            foreach (var item in element.EnumerateArray()) ValidateAllowedEvidence(item);
         }
         else if (element.ValueKind == JsonValueKind.String && element.GetString()?.Length > MaximumEvidenceStringLength)
         {
@@ -188,6 +200,30 @@ public sealed class AuditIngestionService(AuditDbContext dbContext, TimeProvider
 
     private static string NormalizeEvidenceName(string value)
         => string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
+
+    private Task<AuditEvent?> FindExistingAsync(
+        AuditMaterialActionRecordedV1 message,
+        CancellationToken cancellationToken)
+    {
+        var sourceModule = message.SourceModule.Trim().ToUpperInvariant();
+        var action = message.Action.Trim().ToUpperInvariant();
+        return dbContext.AuditEvents.AsNoTracking().SingleOrDefaultAsync(
+            x => x.TenantId == message.TenantId
+                 && x.SourceModule == sourceModule
+                 && x.SourceEventId == message.SourceEventId
+                 && x.Action == action,
+            cancellationToken);
+    }
+
+    private static void EnsureEquivalent(AuditEvent existing, Guid resourceId, string safeEvidence)
+    {
+        if (existing.ResourceId != resourceId || !JsonEquivalent(existing.SafeEvidenceJson, safeEvidence))
+        {
+            throw new AuditRuleException(
+                "AUDIT.INGESTION.IDENTITY_CONFLICT",
+                "The audit ingestion identity is already associated with different safe evidence.");
+        }
+    }
 
     private static bool JsonEquivalent(string left, string right)
         => JsonNode.DeepEquals(JsonNode.Parse(left), JsonNode.Parse(right));

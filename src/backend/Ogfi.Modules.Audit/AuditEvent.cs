@@ -8,9 +8,10 @@ public static class AuditPermissionCodes
 
 public static class AuditActorTypes
 {
-    public const string User = "USER";
-    public const string Worker = "WORKER";
+    public const string Human = "HUMAN";
     public const string System = "SYSTEM";
+    public const string Integration = "INTEGRATION";
+    public const string SupportElevation = "SUPPORT_ELEVATION";
 }
 
 public static class AuditOutcomes
