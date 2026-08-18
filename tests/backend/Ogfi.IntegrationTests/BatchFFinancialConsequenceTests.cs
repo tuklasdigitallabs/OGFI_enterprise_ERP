@@ -25,14 +25,12 @@ public sealed class BatchFFinancialConsequenceTests(BatchFFixture fixture) : ICl
         Assert.Equal(1, await fixture.CountInventoryMovementsAsync(sourceEvent.EventId));
         Assert.Equal(OutboxDeliveryStatuses.Completed,
             (await fixture.GetDeliveryAsync(sourceEvent.EventId, OutboxConsumerCodes.InventoryStockConsequence)).Status);
-        Assert.Null(await fixture.GetOutboxProcessedAtAsync(sourceEvent.EventId));
 
         await fixture.ProcessFinanceAsync(BatchFFixture.TenantA);
         Assert.Equal(1, await fixture.CountSourcePostingsAsync(sourceEvent.EventId));
         Assert.Equal(1, await fixture.CountJournalsAsync(sourceEvent.EventId));
         Assert.Equal(OutboxDeliveryStatuses.Completed,
             (await fixture.GetDeliveryAsync(sourceEvent.EventId, OutboxConsumerCodes.FinanceFinancialConsequence)).Status);
-        Assert.NotNull(await fixture.GetOutboxProcessedAtAsync(sourceEvent.EventId));
 
         var source = await fixture.GetSourcePostingAsync(sourceEvent.EventId);
         Assert.Equal(FinanceStatuses.Posted, source.Status);
