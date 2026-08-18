@@ -21,24 +21,31 @@ public sealed class NoopStockConsequenceAttemptHook : IStockConsequenceAttemptHo
 public sealed class StockConsequenceProcessor(
     ProcurementDbContext procurementDb,
     GoodsReceiptPostedConsumer inventoryConsumer,
+    OutboxDeliveryStore deliveries,
     IStockConsequenceAttemptHook attemptHook,
-    TimeProvider timeProvider,
     ILogger<StockConsequenceProcessor> logger)
 {
     public async Task ProcessTenantAsync(Guid tenantId, CancellationToken cancellationToken)
     {
-        var pending = await procurementDb.OutboxMessages
+        var messages = await procurementDb.OutboxMessages.AsNoTracking()
             .Where(x => x.TenantId == tenantId
-                && x.ProcessedAtUtc == null
-                && x.Type == "Procurement.GoodsReceiptPosted"
-                && x.SchemaVersion == 1)
+                        && x.Type == "Procurement.GoodsReceiptPosted"
+                        && x.SchemaVersion == 1)
             .OrderBy(x => x.OccurredAtUtc)
-            .Take(50)
+            .Take(100)
             .ToListAsync(cancellationToken);
 
-        foreach (var message in pending)
+        foreach (var message in messages)
         {
-            message.AttemptCount++;
+            var delivery = await deliveries.EnsureAsync(
+                tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
+            if (delivery.Status is OutboxDeliveryStatuses.Completed or OutboxDeliveryStatuses.TerminalRejected)
+            {
+                await deliveries.TryFinalizeMessageAsync(tenantId, message.Id, cancellationToken);
+                continue;
+            }
+
+            await deliveries.MarkAttemptAsync(tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
             try
             {
                 await attemptHook.BeforeApplyAsync(tenantId, message.Id, cancellationToken);
@@ -51,30 +58,28 @@ public sealed class StockConsequenceProcessor(
 
                 await inventoryConsumer.ApplyAsync(payload, cancellationToken);
                 await attemptHook.AfterApplyAsync(tenantId, message.Id, cancellationToken);
-                message.LastError = null;
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
+                await deliveries.MarkCompletedAsync(tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, cancellationToken);
             }
             catch (InventoryRuleException ex)
             {
-                message.LastError = ex.Code;
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
+                await deliveries.MarkTerminalRejectedAsync(
+                    tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, ex.Code, cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} was terminally rejected for tenant {TenantId}", message.Id, tenantId);
             }
             catch (JsonException ex)
             {
-                message.LastError = "INVENTORY.EVENT.INVALID_JSON";
-                message.ProcessedAtUtc = timeProvider.GetUtcNow();
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
+                await deliveries.MarkTerminalRejectedAsync(
+                    tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, "INVENTORY.EVENT.INVALID_JSON", cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} contained invalid JSON for tenant {TenantId}", message.Id, tenantId);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                message.LastError = ex.GetType().Name;
-                await procurementDb.SaveChangesAsync(cancellationToken);
-                logger.LogWarning(ex, "Goods Receipt consequence {MessageId} remains pending for tenant {TenantId}", message.Id, tenantId);
+                await deliveries.MarkRetryAsync(
+                    tenantId, message.Id, OutboxConsumerCodes.InventoryStockConsequence, ex.GetType().Name, cancellationToken);
+                logger.LogWarning(ex, "Goods Receipt inventory consequence {MessageId} remains retryable for tenant {TenantId}", message.Id, tenantId);
             }
+
+            await deliveries.TryFinalizeMessageAsync(tenantId, message.Id, cancellationToken);
         }
     }
 }
